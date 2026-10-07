@@ -556,15 +556,10 @@ class GeminiWebClient {
         const inner = new Array(81).fill(null);
         let fileList = null;
         if (params.files && params.files.length > 0) {
-            fileList = params.files.map(f => {
-                if (f.isImage) {
-                    return [f.url, 1];
-                }
-                return [[f.url], f.fileName || 'document.pdf'];
-            });
+            fileList = params.files.map(f => [[f.url], f.fileName || 'file.bin']);
         }
         else if (params.imageUrls && params.imageUrls.length > 0) {
-            fileList = params.imageUrls.map(url => [url, 1]);
+            fileList = params.imageUrls.map(url => [[url], 'image.jpg']);
         }
         inner[0] = [params.prompt, 0, null, fileList, null, null, 0];
         inner[1] = [this.language];
