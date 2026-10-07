@@ -400,21 +400,7 @@ class GeminiWebClient {
         await this.testConnection();
     }
     async testConnection() {
-        // Get extra cookies from google.com (uses native https to bypass follow-redirects maxHeaderSize issue)
-        let extraCookies = {};
-        try {
-            const r = await nativeHttpsGet(ENDPOINTS.GOOGLE, {
-                timeout: this.timeout,
-                proxy: this.proxy,
-            });
-            if (r.status === 200) {
-                extraCookies = parseSetCookieHeaders(r.headers);
-            }
-        }
-        catch {
-            // Ignore errors, continue with existing cookies
-        }
-        const allCookies = { ...extraCookies, ...this.cookies };
+        const allCookies = { ...this.cookies };
         if (!allCookies['__Secure-1PSID']) {
             throw new n8n_workflow_1.NodeOperationError({}, '__Secure-1PSID cookie is required. Please check your cookie input.');
         }
@@ -467,13 +453,20 @@ class GeminiWebClient {
             await this.init();
         }
         const size = fileBuffer.length;
+        // Sanitize fileName for HTTP header: Node.js http.request throws TypeError for non-ASCII chars.
+        // Replace any non-ASCII character (e.g. Cyrillic, Chinese, emoji) with '_'.
+        const safeFileName = fileName
+            .replace(/[^\x20-\x7E]/g, '_')  // keep only printable ASCII
+            .replace(/[^\w.\-]/g, '_')        // keep only safe chars
+            .substring(0, 200)                // limit length
+            || 'file.bin';
         // Step 1: Initiate upload to get the upload URL
         const initiateHeaders = {
             'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8',
             'X-Goog-Upload-Command': 'start',
             'X-Goog-Upload-Header-Content-Length': String(size),
             'X-Goog-Upload-Header-Content-Type': mimeType,
-            'X-Goog-Upload-File-Name': fileName,
+            'X-Goog-Upload-File-Name': safeFileName,
             Cookie: cookieStr(this.cookies),
         };
         const initiateRes = await nativeHttpsPost(ENDPOINTS.UPLOAD, '', {
