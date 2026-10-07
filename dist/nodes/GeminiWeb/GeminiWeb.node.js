@@ -414,11 +414,42 @@ class GeminiWebClient {
         if (!allCookies['__Secure-1PSID']) {
             throw new n8n_workflow_1.NodeOperationError({}, '__Secure-1PSID cookie is required. Please check your cookie input.');
         }
+        console.log('[GeminiWebClient] COOKIE INFO:', {
+            sid_prefix: (this.cookies['__Secure-1PSID'] || '').substring(0, 15) + '...',
+            sid_len: (this.cookies['__Secure-1PSID'] || '').length,
+            sidts_prefix: (this.cookies['__Secure-1PSIDTS'] || '').substring(0, 15) + '...',
+            sidts_len: (this.cookies['__Secure-1PSIDTS'] || '').length,
+            has_sidcc: !!this.cookies['__Secure-1PSIDCC'],
+        });
+
+        // Test RotateCookies endpoint
+        try {
+            const rotateRes = await nativeHttpsPost('https://accounts.google.com/RotateCookies', '[000,"-0000000000000000000"]', {
+                headers: {
+                    'Content-Type': 'application/json',
+                    Cookie: cookieStr(this.cookies),
+                },
+                timeout: 10000,
+                proxy: this.proxy,
+            });
+            console.log('[GeminiWebClient] RotateCookies status:', rotateRes.status, 'set-cookie:', rotateRes.headers['set-cookie'] || rotateRes.headers['Set-Cookie']);
+            if (rotateRes.status === 200) {
+                const rotated = parseSetCookieHeaders(rotateRes.headers);
+                console.log('[GeminiWebClient] Rotated keys:', Object.keys(rotated));
+                if (rotated['__Secure-1PSIDTS']) {
+                    this.cookies['__Secure-1PSIDTS'] = rotated['__Secure-1PSIDTS'];
+                    console.log('[GeminiWebClient] Updated __Secure-1PSIDTS from RotateCookies successfully!');
+                }
+            }
+        } catch (rotateErr) {
+            console.log('[GeminiWebClient] RotateCookies error:', rotateErr.message);
+        }
+
         // Get access token from gemini.google.com/app (uses native https with maxHeaderSize: 65536)
         const res = await nativeHttpsGet(ENDPOINTS.INIT, {
             headers: {
                 ...GEMINI_HEADERS,
-                Cookie: cookieStr(allCookies),
+                Cookie: cookieStr(this.cookies),
             },
             timeout: this.timeout,
             proxy: this.proxy,
