@@ -71,27 +71,51 @@ const GRPC = {
     GET_CONVERSATION: 'hNvQHb',
 };
 const BATCH_EXEC_HEADERS = {
-    'x-goog-ext-525001261-jspb': '[1,null,null,null,null,null,null,null,[4]]',
+    [MODEL_HEADER_KEY]: '[1,null,null,null,null,null,null,null,[4,5,6,8],null,null,null,null,null,null,null]',
     'x-goog-ext-73010989-jspb': '[0]',
 };
-function buildModelHeader(modelId, capacityTail) {
+function buildModelHeader(modelId, capacityTail, modelNumber) {
     return {
-        [MODEL_HEADER_KEY]: `[1,null,null,null,"${modelId}",null,null,0,[4],null,null,${capacityTail}]`,
+        [MODEL_HEADER_KEY]: `[1,null,null,null,"${modelId}",null,null,0,[4,5,6,8],null,null,${capacityTail}, null,null,${modelNumber}]`,
         'x-goog-ext-73010989-jspb': '[0]',
-        'x-goog-ext-73010990-jspb': '[0]',
+        'x-goog-ext-73010990-jspb': '[0,0,0]',
     };
 }
 const MODELS = {
+    'default': {
+        name: 'default',
+        displayName: 'Default (Account Model)',
+        header: null,
+        advancedOnly: false,
+    },
     'gemini-3.6-flash': {
         name: 'gemini-3.6-flash',
-        displayName: 'Gemini 3.6 Flash',
-        header: buildModelHeader('b47e5d4984b0b3c7', 1),
+        displayName: 'Gemini Flash',
+        header: buildModelHeader('fbb127bbb056c959', 1, 1),
+        advancedOnly: false,
+    },
+    'gemini-flash': {
+        name: 'gemini-flash',
+        displayName: 'Gemini Flash',
+        header: buildModelHeader('fbb127bbb056c959', 1, 1),
+        advancedOnly: false,
+    },
+    'gemini-flash-lite': {
+        name: 'gemini-flash-lite',
+        displayName: 'Gemini Flash Lite',
+        header: buildModelHeader('cf41b0e0dd7d53e5', 1, 6),
         advancedOnly: false,
     },
     'gemini-3.1-pro-preview': {
         name: 'gemini-3.1-pro-preview',
-        displayName: 'Gemini 3.1 Pro Preview',
-        header: buildModelHeader('a1b2c3d4e5f60718', 1),
+        displayName: 'Gemini Pro',
+        header: buildModelHeader('9d8ca3786ebdfbea', 1, 3),
+        advancedOnly: false,
+    },
+    'gemini-pro': {
+        name: 'gemini-pro',
+        displayName: 'Gemini Pro',
+        header: buildModelHeader('9d8ca3786ebdfbea', 1, 3),
         advancedOnly: false,
     },
 };
@@ -358,6 +382,7 @@ class GeminiWebClient {
         this.cookies = cookies;
         this.proxy = proxy;
         this.reqId = Math.floor(Math.random() * 90000) + 10000;
+        this.clientSessionUuid = generateUUID().toUpperCase();
     }
     get http() {
         const config = {
@@ -581,38 +606,55 @@ class GeminiWebClient {
             urlParams.set('bl', this.buildLabel);
         if (this.sessionId)
             urlParams.set('f.sid', this.sessionId);
-        // Build request body
-        const body = new URLSearchParams({
-            at: this.accessToken || '',
-            'f.req': JSON.stringify([null, JSON.stringify(inner)]),
-        });
-        // Build headers
-        const modelHeaders = { ...model.header };
-        const headers = {
-            ...GEMINI_HEADERS,
-            ...modelHeaders,
-            'x-goog-ext-525005358-jspb': `["${uid}",1]`,
-            Cookie: cookieStr(this.cookies),
-        };
-        // Make the request using native HTTPS POST
-        // This properly handles Gemini's streaming response: when images are
-        // uploaded, Gemini sends data incrementally. The first chunk may
-        // contain only an acknowledgment, while the full content comes in
-        // subsequent chunks. nativeHttpsPost collects ALL chunks before
-        // resolving, ensuring we get the complete generated content.
-        const generateUrl = `${ENDPOINTS.GENERATE}?${urlParams.toString()}`;
-        const res = await nativeHttpsPost(generateUrl, body.toString(), {
-            headers,
-            timeout: this.timeout,
-            proxy: this.proxy,
-        });
-        // Update cookies from response
-        this.cookies = parseSetCookieHeaders(res.headers, this.cookies);
-        if (res.status !== 200) {
-            throw new n8n_workflow_1.NodeOperationError({}, `Gemini API request failed with status ${res.status}`);
+        // Send request with dynamic model header and automatic retry fallback for error 1097
+        let attempt = 0;
+        let currentModel = model;
+        while (attempt < 2) {
+            attempt++;
+            const modelHeaders = (currentModel && currentModel.header) ? { ...currentModel.header } : {};
+            if (modelHeaders[MODEL_HEADER_KEY]) {
+                try {
+                    const headerArray = JSON.parse(modelHeaders[MODEL_HEADER_KEY]);
+                    const modelNumber = headerArray[headerArray.length - 1];
+                    if (typeof modelNumber === 'number') {
+                        inner[79] = modelNumber;
+                    }
+                    headerArray.push(1); // extended_thinking flag
+                    headerArray.push(this.clientSessionUuid);
+                    modelHeaders[MODEL_HEADER_KEY] = JSON.stringify(headerArray);
+                } catch {}
+            }
+            const body = new URLSearchParams({
+                at: this.accessToken || '',
+                'f.req': JSON.stringify([null, JSON.stringify(inner)]),
+            });
+            const headers = {
+                ...GEMINI_HEADERS,
+                ...modelHeaders,
+                'x-goog-ext-525005358-jspb': `["${uid}",1]`,
+                Cookie: cookieStr(this.cookies),
+            };
+            const generateUrl = `${ENDPOINTS.GENERATE}?${urlParams.toString()}`;
+            const res = await nativeHttpsPost(generateUrl, body.toString(), {
+                headers,
+                timeout: this.timeout,
+                proxy: this.proxy,
+            });
+            this.cookies = parseSetCookieHeaders(res.headers, this.cookies);
+            if (res.status !== 200) {
+                throw new n8n_workflow_1.NodeOperationError({}, `Gemini API request failed with status ${res.status}`);
+            }
+            try {
+                return this.parseResponse(res.data, currentModel ? currentModel.name : 'default');
+            } catch (err) {
+                if (err.message && err.message.includes('1097') && currentModel && currentModel.header && attempt === 1) {
+                    currentModel = MODELS['default'];
+                    inner[79] = 1;
+                    continue;
+                }
+                throw err;
+            }
         }
-        const responseText = res.data;
-        return this.parseResponse(responseText, model.name);
     }
     parseResponse(text, modelName) {
         const parts = extractJsonArrays(text);
@@ -772,9 +814,17 @@ class GeminiWebClient {
             at: this.accessToken || '',
             'f.req': JSON.stringify([serialized]),
         });
+        const batchHeaders = { ...BATCH_EXEC_HEADERS };
+        if (batchHeaders[MODEL_HEADER_KEY]) {
+            try {
+                const parsed = JSON.parse(batchHeaders[MODEL_HEADER_KEY]);
+                parsed.push(this.clientSessionUuid);
+                batchHeaders[MODEL_HEADER_KEY] = JSON.stringify(parsed);
+            } catch {}
+        }
         const headers = {
             ...GEMINI_HEADERS,
-            ...BATCH_EXEC_HEADERS,
+            ...batchHeaders,
             Cookie: cookieStr(this.cookies),
         };
         const res = await this.http.post(`${ENDPOINTS.BATCH_EXEC}?${urlParams.toString()}`, body.toString(), { headers });
