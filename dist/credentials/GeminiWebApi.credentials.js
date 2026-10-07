@@ -13,6 +13,11 @@ class GeminiWebApi {
                 type: 'options',
                 options: [
                     {
+                        name: 'Raw Cookie Header / String',
+                        value: 'cookieString',
+                        description: 'Paste the full Cookie header string copied from browser DevTools (e.g. __Secure-1PSID=...; __Secure-1PSIDTS=...)',
+                    },
+                    {
                         name: 'Full Cookie JSON',
                         value: 'cookieJson',
                         description: 'Paste the full cookie array exported from browser (e.g. EditThisCookie extension)',
@@ -20,11 +25,27 @@ class GeminiWebApi {
                     {
                         name: 'Individual Cookies',
                         value: 'individual',
-                        description: 'Enter __Secure-1PSID and __Secure-1PSIDTS values directly',
+                        description: 'Enter __Secure-1PSID, __Secure-1PSIDTS, and __Secure-1PSIDCC values directly',
                     },
                 ],
-                default: 'cookieJson',
+                default: 'cookieString',
                 description: 'Choose how to provide Google cookies',
+            },
+            {
+                displayName: 'Cookie Header String',
+                name: 'cookieString',
+                type: 'string',
+                typeOptions: {
+                    rows: 5,
+                },
+                default: '',
+                description: 'Paste the complete Cookie header string copied from DevTools -> Network -> any gemini.google.com request (starts with __Secure-1PSID=... or AEC=...)',
+                displayOptions: {
+                    show: {
+                        authMode: ['cookieString'],
+                    },
+                },
+                placeholder: '__Secure-1PSID=g.a000...; __Secure-1PSIDTS=sidts-...; __Secure-1PSIDCC=AKEyX...',
             },
             {
                 displayName: 'Cookie JSON',
@@ -65,7 +86,22 @@ class GeminiWebApi {
                     password: true,
                 },
                 default: '',
-                description: 'The __Secure-1PSIDTS cookie value (optional but recommended for session stability)',
+                description: 'The __Secure-1PSIDTS cookie value (timestamp / freshness token)',
+                displayOptions: {
+                    show: {
+                        authMode: ['individual'],
+                    },
+                },
+            },
+            {
+                displayName: '__Secure-1PSIDCC',
+                name: 'secure1Psidcc',
+                type: 'string',
+                typeOptions: {
+                    password: true,
+                },
+                default: '',
+                description: 'The __Secure-1PSIDCC cookie value (client verification token)',
                 displayOptions: {
                     show: {
                         authMode: ['individual'],

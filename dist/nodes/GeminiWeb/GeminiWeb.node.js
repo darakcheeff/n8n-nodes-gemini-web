@@ -119,23 +119,80 @@ const MODELS = {
         advancedOnly: false,
     },
 };
-function parseCookieJson(cookieJsonStr) {
+function parseCookieString(rawStr) {
+    if (!rawStr || typeof rawStr !== 'string') return {};
+    let s = rawStr.trim();
+    if (s.toLowerCase().startsWith('cookie:')) {
+        s = s.substring(7).trim();
+    }
     const cookies = {};
-    try {
-        const arr = JSON.parse(cookieJsonStr);
-        if (!Array.isArray(arr)) {
-            throw new Error('Cookie JSON must be an array of cookie objects');
-        }
-        for (const item of arr) {
-            if (item && item.name && item.value) {
-                cookies[item.name] = item.value;
+    const parts = s.split(';');
+    for (const part of parts) {
+        const trimmed = part.trim();
+        const eq = trimmed.indexOf('=');
+        if (eq > 0) {
+            const key = trimmed.slice(0, eq).trim();
+            const val = trimmed.slice(eq + 1).trim();
+            if (key && val) {
+                cookies[key] = val;
             }
         }
     }
-    catch (error) {
-        throw new n8n_workflow_1.NodeOperationError({}, `Failed to parse cookie JSON: ${error.message}. Make sure you paste a valid JSON array of cookie objects.`);
-    }
     return cookies;
+}
+function parseCookieJson(cookieInput) {
+    if (!cookieInput || typeof cookieInput !== 'string') return {};
+    const trimmed = cookieInput.trim();
+    if (!trimmed.startsWith('[') && trimmed.includes('=')) {
+        return parseCookieString(trimmed);
+    }
+    try {
+        const arr = JSON.parse(trimmed);
+        if (Array.isArray(arr)) {
+            const cookies = {};
+            for (const item of arr) {
+                if (item && item.name && item.value) {
+                    cookies[item.name] = item.value;
+                }
+            }
+            return cookies;
+        }
+    } catch {
+        const parsed = parseCookieString(trimmed);
+        if (Object.keys(parsed).length > 0) {
+            return parsed;
+        }
+        throw new n8n_workflow_1.NodeOperationError({}, 'Failed to parse cookie input. Please provide a valid JSON array or a Cookie header string.');
+    }
+    return {};
+}
+function getCookieCachePath() {
+    return '/tmp/.gemini_cookie_cache.json';
+}
+function loadCookieCache(psid) {
+    try {
+        const fs = require('fs');
+        const p = getCookieCachePath();
+        if (fs.existsSync(p)) {
+            const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+            const key = psid ? psid.substring(0, 32) : 'default';
+            return data[key] ? data[key].cookies : null;
+        }
+    } catch {}
+    return null;
+}
+function saveCookieCache(psid, cookies) {
+    try {
+        const fs = require('fs');
+        const p = getCookieCachePath();
+        let data = {};
+        if (fs.existsSync(p)) {
+            try { data = JSON.parse(fs.readFileSync(p, 'utf8')); } catch {}
+        }
+        const key = psid ? psid.substring(0, 32) : 'default';
+        data[key] = { cookies, updatedAt: Date.now() };
+        fs.writeFileSync(p, JSON.stringify(data, null, 2), 'utf8');
+    } catch {}
 }
 function cookieStr(cookies) {
     return Object.entries(cookies)
@@ -400,60 +457,28 @@ class GeminiWebClient {
         await this.testConnection();
     }
     async testConnection() {
-        let extraCookies = {};
-        try {
-            const r = await nativeHttpsGet(ENDPOINTS.GOOGLE, {
+        if (!this.cookies['__Secure-1PSID']) {
+            throw new n8n_workflow_1.NodeOperationError({}, '__Secure-1PSID cookie is required. Please check your cookie credentials.');
+        }
+
+        // Restore any cached rotated cookies for this __Secure-1PSID
+        const cached = loadCookieCache(this.cookies['__Secure-1PSID']);
+        if (cached) {
+            this.cookies = { ...this.cookies, ...cached };
+        }
+
+        const fetchInit = async (cookieObj) => {
+            return await nativeHttpsGet(ENDPOINTS.INIT, {
+                headers: {
+                    ...GEMINI_HEADERS,
+                    Cookie: cookieStr(cookieObj),
+                },
                 timeout: this.timeout,
                 proxy: this.proxy,
             });
-            if (r.status === 200) {
-                extraCookies = parseSetCookieHeaders(r.headers);
-            }
-        } catch {}
-        const allCookies = { ...extraCookies, ...this.cookies };
-        if (!allCookies['__Secure-1PSID']) {
-            throw new n8n_workflow_1.NodeOperationError({}, '__Secure-1PSID cookie is required. Please check your cookie input.');
-        }
-        console.log('[GeminiWebClient] COOKIE INFO:', {
-            sid_prefix: (this.cookies['__Secure-1PSID'] || '').substring(0, 15) + '...',
-            sid_len: (this.cookies['__Secure-1PSID'] || '').length,
-            sidts_prefix: (this.cookies['__Secure-1PSIDTS'] || '').substring(0, 15) + '...',
-            sidts_len: (this.cookies['__Secure-1PSIDTS'] || '').length,
-            has_sidcc: !!this.cookies['__Secure-1PSIDCC'],
-        });
+        };
 
-        // Test RotateCookies endpoint
-        try {
-            const rotateRes = await nativeHttpsPost('https://accounts.google.com/RotateCookies', '[000,"-0000000000000000000"]', {
-                headers: {
-                    'Content-Type': 'application/json',
-                    Cookie: cookieStr(this.cookies),
-                },
-                timeout: 10000,
-                proxy: this.proxy,
-            });
-            console.log('[GeminiWebClient] RotateCookies status:', rotateRes.status, 'set-cookie:', rotateRes.headers['set-cookie'] || rotateRes.headers['Set-Cookie']);
-            if (rotateRes.status === 200) {
-                const rotated = parseSetCookieHeaders(rotateRes.headers);
-                console.log('[GeminiWebClient] Rotated keys:', Object.keys(rotated));
-                if (rotated['__Secure-1PSIDTS']) {
-                    this.cookies['__Secure-1PSIDTS'] = rotated['__Secure-1PSIDTS'];
-                    console.log('[GeminiWebClient] Updated __Secure-1PSIDTS from RotateCookies successfully!');
-                }
-            }
-        } catch (rotateErr) {
-            console.log('[GeminiWebClient] RotateCookies error:', rotateErr.message);
-        }
-
-        // Get access token from gemini.google.com/app (uses native https with maxHeaderSize: 65536)
-        const res = await nativeHttpsGet(ENDPOINTS.INIT, {
-            headers: {
-                ...GEMINI_HEADERS,
-                Cookie: cookieStr(this.cookies),
-            },
-            timeout: this.timeout,
-            proxy: this.proxy,
-        });
+        let res = await fetchInit(this.cookies);
         if (res.status !== 200) {
             throw new n8n_workflow_1.NodeOperationError({}, `Failed to connect to Gemini: HTTP ${res.status}. Your cookies may be expired or invalid.`);
         }
@@ -462,56 +487,57 @@ class GeminiWebClient {
         let cfb2h = (html.match(/"cfb2h":\s*"(.*?)"/) || [])[1] || null;
         let fdrfje = (html.match(/"FdrFJe":\s*"(.*?)"/) || [])[1] || null;
         let language = (html.match(/"TuX5cc":\s*"(.*?)"/) || [])[1] || null;
-        let usedCookies = allCookies;
 
-        // If SNlM0e was not found with extraCookies, try with this.cookies directly (without anonymous extraCookies)
-        if (!snlm0e && Object.keys(extraCookies).length > 0) {
+        // If SNlM0e is not found (stale timestamp or rotated session), attempt cookie rotation
+        if (!snlm0e) {
             try {
-                const resDirect = await nativeHttpsGet(ENDPOINTS.INIT, {
+                const rotateRes = await nativeHttpsPost('https://accounts.google.com/RotateCookies', '[000,"-0000000000000000000"]', {
                     headers: {
-                        ...GEMINI_HEADERS,
+                        'Content-Type': 'application/json',
                         Cookie: cookieStr(this.cookies),
                     },
-                    timeout: this.timeout,
+                    timeout: 10000,
                     proxy: this.proxy,
                 });
-                if (resDirect.status === 200) {
-                    const htmlDirect = typeof resDirect.data === 'string' ? resDirect.data : String(resDirect.data);
-                    const snlm0eDirect = (htmlDirect.match(/"SNlM0e":\s*"(.*?)"/) || [])[1] || null;
-                    if (snlm0eDirect) {
-                        console.log('[GeminiWebClient] Direct cookies (without extraCookies) succeeded!');
-                        html = htmlDirect;
-                        snlm0e = snlm0eDirect;
-                        cfb2h = (htmlDirect.match(/"cfb2h":\s*"(.*?)"/) || [])[1] || cfb2h;
-                        fdrfje = (htmlDirect.match(/"FdrFJe":\s*"(.*?)"/) || [])[1] || fdrfje;
-                        language = (htmlDirect.match(/"TuX5cc":\s*"(.*?)"/) || [])[1] || language;
-                        usedCookies = this.cookies;
+                if (rotateRes.status === 200) {
+                    const rotated = parseSetCookieHeaders(rotateRes.headers);
+                    if (rotated['__Secure-1PSIDTS']) {
+                        this.cookies['__Secure-1PSIDTS'] = rotated['__Secure-1PSIDTS'];
+                        if (rotated['__Secure-1PSIDCC']) {
+                            this.cookies['__Secure-1PSIDCC'] = rotated['__Secure-1PSIDCC'];
+                        }
+                        saveCookieCache(this.cookies['__Secure-1PSID'], this.cookies);
+                        res = await fetchInit(this.cookies);
+                        html = typeof res.data === 'string' ? res.data : String(res.data);
+                        snlm0e = (html.match(/"SNlM0e":\s*"(.*?)"/) || [])[1] || null;
+                        cfb2h = (html.match(/"cfb2h":\s*"(.*?)"/) || [])[1] || cfb2h;
+                        fdrfje = (html.match(/"FdrFJe":\s*"(.*?)"/) || [])[1] || fdrfje;
+                        language = (html.match(/"TuX5cc":\s*"(.*?)"/) || [])[1] || language;
                     }
                 }
-            } catch (directErr) {
-                console.log('[GeminiWebClient] Direct cookie retry error:', directErr.message);
-            }
+            } catch {}
         }
 
-        console.log('[GeminiWebClient] INIT DIAGNOSTIC:', {
+        console.log('[GeminiWebClient] INIT STATUS:', {
             hasAccessToken: !!snlm0e,
-            accessTokenPrefix: snlm0e ? snlm0e.substring(0, 8) + '...' : 'NULL',
+            accessTokenPrefix: snlm0e ? snlm0e.substring(0, 8) + '...' : 'NULL (EXPIRED/UNAUTHENTICATED)',
             buildLabel: cfb2h,
-            hasSNlM0eInHtml: html.includes('SNlM0e'),
-            hasWIZInHtml: html.includes('WIZ_global_data'),
-            htmlLength: html.length,
-            title: (html.match(/<title>([^<]+)<\/title>/) || [])[1],
-            cookieKeys: Object.keys(usedCookies),
+            cookieKeys: Object.keys(this.cookies),
         });
 
-        if (!snlm0e && !cfb2h && !language) {
-            throw new n8n_workflow_1.NodeOperationError({}, 'Failed to extract access token from Gemini. Your cookies may be expired or invalid. Please re-export cookies from your browser.');
+        if (!snlm0e) {
+            throw new n8n_workflow_1.NodeOperationError(
+                {},
+                'Failed to authenticate with Google Gemini: access token (SNlM0e) not found. Your Google cookies are expired or invalid. Please update credentials with fresh cookies from your browser (https://gemini.google.com). Tip: in DevTools Network tab, copy the entire "Cookie:" request header.'
+            );
         }
+
         this.accessToken = snlm0e;
         this.buildLabel = cfb2h;
         this.sessionId = fdrfje;
         this.language = language || 'en';
-        this.cookies = parseSetCookieHeaders(res.headers, usedCookies);
+        this.cookies = parseSetCookieHeaders(res.headers, this.cookies);
+        saveCookieCache(this.cookies['__Secure-1PSID'], this.cookies);
         this.reqId = Math.floor(Math.random() * 90000) + 10000;
         return {
             success: true,
@@ -1819,7 +1845,10 @@ class GeminiWeb {
         const credentials = await this.getCredentials('geminiWebApi');
         // Parse cookies based on auth mode
         let cookies = {};
-        if (credentials.authMode === 'cookieJson') {
+        if (credentials.authMode === 'cookieString') {
+            cookies = parseCookieString(credentials.cookieString);
+        }
+        else if (credentials.authMode === 'cookieJson') {
             cookies = parseCookieJson(credentials.cookieJson);
         }
         else {
@@ -1828,6 +1857,9 @@ class GeminiWeb {
             }
             if (credentials.secure1Psidts) {
                 cookies['__Secure-1PSIDTS'] = credentials.secure1Psidts;
+            }
+            if (credentials.secure1Psidcc) {
+                cookies['__Secure-1PSIDCC'] = credentials.secure1Psidcc;
             }
         }
         if (!cookies['__Secure-1PSID']) {
