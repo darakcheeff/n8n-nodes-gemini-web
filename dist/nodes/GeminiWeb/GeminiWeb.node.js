@@ -68,6 +68,7 @@ const GRPC = {
     DELETE_GEM: 'UXcSJb',
     LIST_CONVERSATIONS: 'MaZiqc',
     DELETE_CONVERSATION: 'GzXR5e',
+    GET_CONVERSATION: 'hNvQHb',
 };
 const BATCH_EXEC_HEADERS = {
     'x-goog-ext-525001261-jspb': '[1,null,null,null,null,null,null,null,[4]]',
@@ -867,16 +868,106 @@ class GeminiWebClient {
         return chats;
     }
     async deleteChat(chatId) {
-        const payload = JSON.stringify([chatId]);
+        const normalizedChatId = normalizeChatId(chatId);
+        const payload = JSON.stringify([normalizedChatId]);
         await this.batchExecute([{
                 rpcid: GRPC.DELETE_CONVERSATION,
                 payload,
             }]);
         return {
             success: true,
-            id: chatId,
-            message: `Chat ${chatId} has been deleted.`,
+            id: normalizedChatId,
+            message: `Chat ${normalizedChatId} has been deleted.`,
         };
+    }
+    async getChatMessages(chatId, maxTurns = 500) {
+        const normalizedChatId = normalizeChatId(chatId);
+        const pageSize = Math.min(maxTurns, 100);
+        let cursor = null;
+        const rawTurns = [];
+        const seenTurnIds = new Set();
+        for (let page = 0; page < 50; page++) {
+            const payload = JSON.stringify([normalizedChatId, pageSize, cursor, 1, [0], [4], null, 1]);
+            const parts = await this.batchExecute([{
+                    rpcid: GRPC.GET_CONVERSATION,
+                    payload,
+                }]);
+            let parsedPayload = null;
+            for (const part of parts) {
+                const partBodyStr = getNestedValue(part, [2]);
+                if (partBodyStr && typeof partBodyStr === 'string') {
+                    try {
+                        parsedPayload = JSON.parse(partBodyStr);
+                        break;
+                    }
+                    catch {
+                        continue;
+                    }
+                }
+            }
+            if (!parsedPayload) {
+                break;
+            }
+            const records = Array.isArray(parsedPayload[0]) ? parsedPayload[0] : [];
+            let addedCount = 0;
+            for (const record of records) {
+                const turnId = getNestedValue(record, [0, 1]) || JSON.stringify(getNestedValue(record, [0]));
+                if (turnId && !seenTurnIds.has(turnId)) {
+                    seenTurnIds.add(turnId);
+                    rawTurns.push(record);
+                    addedCount++;
+                }
+            }
+            cursor = typeof parsedPayload[1] === 'string' && parsedPayload[1] ? parsedPayload[1] : null;
+            if (!cursor || !addedCount || rawTurns.length >= maxTurns) {
+                break;
+            }
+        }
+        // Records come newest first: restore chronological order
+        rawTurns.reverse();
+        // Extract chosen responses for branched/regenerated turns
+        const chosen = {};
+        for (const turn of rawTurns) {
+            if (Array.isArray(turn[1]) && typeof turn[1][2] === 'string') {
+                chosen[turn[1][2]] = true;
+            }
+        }
+        const messages = [];
+        let index = 0;
+        for (const turn of rawTurns) {
+            // User message
+            const userPart = (Array.isArray(turn[2]) && turn[2][0]) || [];
+            const userText = typeof userPart[0] === 'string' ? userPart[0].trim() : '';
+            const attachments = extractUserAttachments(userPart);
+            if (userText || attachments.length > 0) {
+                index++;
+                messages.push({
+                    index,
+                    role: 'user',
+                    text: userText,
+                    attachments: attachments.length > 0 ? attachments : undefined,
+                });
+            }
+            // Assistant response
+            const candidates = (Array.isArray(turn[3]) && turn[3][0]) || [];
+            const pick = candidates.find((c) => Array.isArray(c) && chosen[c[0]]) || candidates[0];
+            if (pick && Array.isArray(pick[1])) {
+                let responseText = typeof pick[1][0] === 'string' ? pick[1][0].trim() : '';
+                responseText = responseText.replace(/^http:\/\/googleusercontent\.com\/card_content\/\d+/g, '');
+                responseText = responseText.replace(/http:\/\/googleusercontent\.com\/\w+\/\d+\n*/g, '');
+                const images = extractCandidateImages(pick);
+                if (responseText || images.length > 0) {
+                    index++;
+                    messages.push({
+                        index,
+                        role: 'assistant',
+                        text: responseText,
+                        images: images.length > 0 ? images : undefined,
+                    });
+                }
+            }
+        }
+        return messages;
     }
 }
 // ============================================================================
@@ -888,6 +979,54 @@ function generateUUID() {
         const v = c === 'x' ? r : (r & 0x3) | 0x8;
         return v.toString(16).toUpperCase();
     });
+}
+function normalizeChatId(chatId) {
+    let id = String(chatId || '').trim();
+    if (id.startsWith('http://') || id.startsWith('https://')) {
+        const match = id.match(/\/app\/([a-zA-Z0-9_-]+)/);
+        if (match) {
+            id = match[1];
+        }
+    }
+    if (id && !id.startsWith('c_')) {
+        id = `c_${id}`;
+    }
+    return id;
+}
+function extractUserAttachments(userPart) {
+    const attachments = [];
+    const rawAttachments = getNestedValue(userPart, [4]);
+    if (rawAttachments) {
+        const collect = (node) => {
+            if (typeof node === 'string') {
+                if (/^https?:\/\//i.test(node) || /^[^/\\:*?"<>|$]{1,120}\.[a-z0-9]{2,6}$/i.test(node)) {
+                    if (!attachments.includes(node)) {
+                        attachments.push(node);
+                    }
+                }
+            }
+            else if (Array.isArray(node)) {
+                for (const item of node) {
+                    collect(item);
+                }
+            }
+        };
+        collect(rawAttachments);
+    }
+    return attachments;
+}
+function extractCandidateImages(candidate) {
+    const images = [];
+    const webImages = getNestedValue(candidate, [12, 1], []) || [];
+    if (Array.isArray(webImages)) {
+        for (const wi of webImages) {
+            const url = getNestedValue(wi, [0, 0, 0]);
+            if (url && typeof url === 'string') {
+                images.push(url);
+            }
+        }
+    }
+    return images;
 }
 function getNestedValue(obj, path, defaultValue = undefined) {
     let current = obj;
@@ -1059,6 +1198,12 @@ class GeminiWeb {
                             action: 'List chats',
                         },
                         {
+                            name: 'Get All Messages in Chat',
+                            value: 'getAllMessagesInChat',
+                            description: 'Get all messages and turns from a specific chat by ID',
+                            action: 'Get all messages in chat',
+                        },
+                        {
                             name: 'Delete Chat',
                             value: 'deleteChat',
                             description: 'Delete a conversation by its ID',
@@ -1213,11 +1358,35 @@ class GeminiWeb {
                     name: 'chatId',
                     type: 'string',
                     default: '',
-                    description: 'The conversation ID to delete (e.g. "c_...")',
+                    description: 'The conversation ID (e.g. "c_..." or Gemini URL)',
                     required: true,
                     displayOptions: {
                         show: {
-                            operation: ['deleteChat'],
+                            operation: ['deleteChat', 'getAllMessagesInChat'],
+                        },
+                    },
+                },
+                {
+                    displayName: 'Output Format',
+                    name: 'outputFormat',
+                    type: 'options',
+                    options: [
+                        {
+                            name: 'Each Message as Item',
+                            value: 'eachMessage',
+                            description: 'Output each message as a separate item',
+                        },
+                        {
+                            name: 'Single Object (Messages Array)',
+                            value: 'singleItem',
+                            description: 'Output one item containing an array of all messages',
+                        },
+                    ],
+                    default: 'eachMessage',
+                    description: 'How to structure the output data',
+                    displayOptions: {
+                        show: {
+                            operation: ['getAllMessagesInChat'],
                         },
                     },
                 },
@@ -1509,6 +1678,49 @@ class GeminiWeb {
                         json: res,
                         pairedItem: { item: i },
                     });
+                }
+                catch (error) {
+                    if (this.continueOnFail()) {
+                        returnData.push({
+                            json: { error: error.message },
+                            pairedItem: { item: i },
+                        });
+                    }
+                    else {
+                        throw error;
+                    }
+                }
+            }
+            return [returnData];
+        }
+        if (operation === 'getAllMessagesInChat') {
+            for (let i = 0; i < items.length; i++) {
+                try {
+                    const chatId = this.getNodeParameter('chatId', i);
+                    const outputFormat = this.getNodeParameter('outputFormat', i, 'eachMessage');
+                    const messages = await client.getChatMessages(chatId);
+                    const normalizedId = normalizeChatId(chatId);
+                    if (outputFormat === 'singleItem') {
+                        returnData.push({
+                            json: {
+                                chatId: normalizedId,
+                                totalMessages: messages.length,
+                                messages,
+                            },
+                            pairedItem: { item: i },
+                        });
+                    }
+                    else {
+                        for (const msg of messages) {
+                            returnData.push({
+                                json: {
+                                    chatId: normalizedId,
+                                    ...msg,
+                                },
+                                pairedItem: { item: i },
+                            });
+                        }
+                    }
                 }
                 catch (error) {
                     if (this.continueOnFail()) {
