@@ -431,31 +431,32 @@ class GeminiWebClient {
                 : 'Connected but access token not found. Some features may not work.',
         };
     }
-    async uploadImage(imageBuffer, mimeType = 'image/jpeg') {
+    async uploadFile(fileBuffer, mimeType = 'application/octet-stream', fileName = 'file.bin') {
         if (!this.accessToken) {
             await this.init();
         }
-        const size = imageBuffer.length;
+        const size = fileBuffer.length;
         // Step 1: Initiate upload to get the upload URL
-        // Use nativeHttpsPost to avoid follow-redirects header issues
+        const initiateHeaders = {
+            'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8',
+            'X-Goog-Upload-Command': 'start',
+            'X-Goog-Upload-Header-Content-Length': String(size),
+            'X-Goog-Upload-Header-Content-Type': mimeType,
+            'X-Goog-Upload-File-Name': fileName,
+            Cookie: cookieStr(this.cookies),
+        };
         const initiateRes = await nativeHttpsPost(ENDPOINTS.UPLOAD, '', {
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8',
-                'X-Goog-Upload-Command': 'start',
-                'X-Goog-Upload-Header-Content-Length': String(size),
-                'X-Goog-Upload-Header-Content-Type': mimeType,
-                Cookie: cookieStr(this.cookies),
-            },
+            headers: initiateHeaders,
             timeout: this.timeout,
             proxy: this.proxy,
         });
         const uploadUrl = initiateRes.headers['x-goog-upload-url'] ||
             initiateRes.headers['X-Goog-Upload-URL'];
         if (!uploadUrl) {
-            throw new n8n_workflow_1.NodeOperationError({}, `Failed to initiate image upload. No upload URL received. Status: ${initiateRes.status}`);
+            throw new n8n_workflow_1.NodeOperationError({}, `Failed to initiate file upload (${fileName}). No upload URL received. Status: ${initiateRes.status}`);
         }
-        // Step 2: Upload the actual image data
-        const uploadRes = await nativeHttpsPost(uploadUrl, imageBuffer, {
+        // Step 2: Upload the actual file data
+        const uploadRes = await nativeHttpsPost(uploadUrl, fileBuffer, {
             headers: {
                 'Content-Type': mimeType,
                 'X-Goog-Upload-Command': 'upload, finalize',
@@ -465,13 +466,16 @@ class GeminiWebClient {
             timeout: this.timeout,
             proxy: this.proxy,
         });
-        const imageUrl = String(uploadRes.data).trim();
-        if (!imageUrl) {
-            throw new n8n_workflow_1.NodeOperationError({}, `Failed to upload image. No image URL received in response. Status: ${uploadRes.status}`);
+        const fileUrl = String(uploadRes.data).trim();
+        if (!fileUrl) {
+            throw new n8n_workflow_1.NodeOperationError({}, `Failed to upload file (${fileName}). No file URL received in response. Status: ${uploadRes.status}`);
         }
         // Update cookies from response
         this.cookies = parseSetCookieHeaders(uploadRes.headers, this.cookies);
-        return imageUrl;
+        return fileUrl;
+    }
+    async uploadImage(imageBuffer, mimeType = 'image/jpeg') {
+        return this.uploadFile(imageBuffer, mimeType, 'image.jpg');
     }
     async generateContent(params) {
         if (!this.accessToken) {
@@ -485,10 +489,19 @@ class GeminiWebClient {
         this.reqId += 100000;
         // Build the inner request array (81 elements)
         const inner = new Array(81).fill(null);
-        const imageList = params.imageUrls && params.imageUrls.length > 0
-            ? params.imageUrls.map(url => [url, 1])
-            : null;
-        inner[0] = [params.prompt, 0, null, imageList, null, null, 0];
+        let fileList = null;
+        if (params.files && params.files.length > 0) {
+            fileList = params.files.map(f => {
+                if (f.isImage) {
+                    return [f.url, 1];
+                }
+                return [[f.url], f.fileName || 'document.pdf'];
+            });
+        }
+        else if (params.imageUrls && params.imageUrls.length > 0) {
+            fileList = params.imageUrls.map(url => [url, 1]);
+        }
+        inner[0] = [params.prompt, 0, null, fileList, null, null, 0];
         inner[1] = [this.language];
         inner[2] = metadata;
         inner[6] = [1];
@@ -1028,6 +1041,83 @@ function extractCandidateImages(candidate) {
     }
     return images;
 }
+function getExtensionFromMime(mimeType) {
+    const map = {
+        'image/jpeg': 'jpg',
+        'image/png': 'png',
+        'image/webp': 'webp',
+        'image/gif': 'gif',
+        'application/pdf': 'pdf',
+        'text/plain': 'txt',
+        'text/markdown': 'md',
+        'text/csv': 'csv',
+        'text/html': 'html',
+        'application/json': 'json',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+        'application/msword': 'doc',
+    };
+    return map[mimeType] || mimeType.split('/')[1] || 'bin';
+}
+function parseUrlList(input) {
+    if (!input)
+        return [];
+    if (Array.isArray(input)) {
+        return input.map(u => String(u).trim()).filter(Boolean);
+    }
+    if (typeof input === 'string') {
+        const trimmed = input.trim();
+        if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+            try {
+                const parsed = JSON.parse(trimmed);
+                if (Array.isArray(parsed)) {
+                    return parsed.map(u => String(u).trim()).filter(Boolean);
+                }
+            }
+            catch {
+                // Not JSON, continue to string splitting
+            }
+        }
+        return trimmed.split(/[\r\n,]+/).map(u => u.trim()).filter(Boolean);
+    }
+    return [];
+}
+async function downloadFileFromUrl(url) {
+    const res = await axios_1.default.get(url, {
+        responseType: 'arraybuffer',
+        timeout: 30000,
+        maxContentLength: 100 * 1024 * 1024,
+    });
+    const buffer = Buffer.from(res.data);
+    const contentType = (res.headers['content-type'] || 'application/octet-stream').split(';')[0].trim();
+    let fileName = '';
+    const cd = res.headers['content-disposition'];
+    if (cd) {
+        const match = cd.match(/filename\*?=['"]?(?:UTF-\d['"]*)?([^;\r\n"']*)['"]?/i);
+        if (match && match[1]) {
+            try {
+                fileName = decodeURIComponent(match[1]);
+            }
+            catch {
+                fileName = match[1];
+            }
+        }
+    }
+    if (!fileName) {
+        try {
+            const urlObj = new URL(url);
+            const pathname = urlObj.pathname;
+            fileName = pathname.split('/').filter(Boolean).pop() || '';
+        }
+        catch {
+            fileName = url.split('/').pop().split('?')[0];
+        }
+    }
+    if (!fileName || !fileName.includes('.')) {
+        const ext = getExtensionFromMime(contentType);
+        fileName = fileName ? `${fileName}.${ext}` : `attachment.${ext}`;
+    }
+    return { buffer, mimeType: contentType, fileName };
+}
 function getNestedValue(obj, path, defaultValue = undefined) {
     let current = obj;
     for (const key of path) {
@@ -1403,28 +1493,38 @@ class GeminiWeb {
                     },
                 },
                 {
-                    displayName: 'Image Input',
+                    displayName: 'Attachments / Files',
                     name: 'imageInput',
                     type: 'options',
                     options: [
                         {
                             name: 'None',
                             value: 'none',
-                            description: 'Text only, no images',
+                            description: 'Text only, no attachments',
                         },
                         {
-                            name: 'Auto Detect (All Binary Properties)',
+                            name: 'Binary: Auto-Detect (All Files)',
                             value: 'auto',
-                            description: 'Automatically scan all binary properties from the input item and upload any image files (recommended for n8n Form Trigger)',
+                            description: 'Automatically scan and upload all binary files from the input item (images, PDFs, documents, text)',
                         },
                         {
-                            name: 'Specific Binary Properties',
+                            name: 'Binary: Specific Properties',
                             value: 'binary',
-                            description: 'Manually specify which binary property names contain images',
+                            description: 'Manually specify which binary property names contain files',
+                        },
+                        {
+                            name: 'File URLs (Array or List)',
+                            value: 'urls',
+                            description: 'Provide URLs of files to download and attach',
+                        },
+                        {
+                            name: 'Combined (Binary + URLs)',
+                            value: 'combined',
+                            description: 'Attach both binary files and URLs',
                         },
                     ],
                     default: 'none',
-                    description: 'Whether to attach images to the prompt from n8n binary data',
+                    description: 'Whether to attach files (images, PDFs, documents) to the prompt',
                     displayOptions: {
                         show: {
                             operation: ['generate', 'chat'],
@@ -1432,15 +1532,31 @@ class GeminiWeb {
                     },
                 },
                 {
-                    displayName: 'Binary Property (Images)',
+                    displayName: 'Binary Property Names',
                     name: 'binaryPropertyName',
                     type: 'string',
                     default: 'data',
-                    description: 'Name of the binary property containing the image. Comma-separated for multiple images (e.g. "data,image2"). The previous node must output binary data.',
+                    description: 'Name of the binary property containing the file(s). Comma-separated for multiple (e.g. "data,document2").',
                     displayOptions: {
                         show: {
                             operation: ['generate', 'chat'],
-                            imageInput: ['binary'],
+                            imageInput: ['binary', 'combined'],
+                        },
+                    },
+                },
+                {
+                    displayName: 'File URLs',
+                    name: 'fileUrls',
+                    type: 'string',
+                    typeOptions: {
+                        rows: 3,
+                    },
+                    default: '',
+                    description: 'Array of URLs (e.g. {{ $json.urls }}) or newline/comma-separated URLs to download and attach',
+                    displayOptions: {
+                        show: {
+                            operation: ['generate', 'chat'],
+                            imageInput: ['urls', 'combined'],
                         },
                     },
                 },
@@ -1759,27 +1875,27 @@ class GeminiWeb {
                         }
                     }
                 }
-                // Upload images from binary data if enabled
-                let imageUrls = [];
+                // Upload attachments (images, PDFs, documents) from binary data or URLs
+                const files = [];
                 const uploadErrors = [];
-                if (imageInput === 'auto') {
-                    // Auto-detect: scan all binary properties and upload image files
+                // 1. Process Binary Data
+                if (imageInput === 'auto' || imageInput === 'combined') {
                     const binaryData = items[i].binary;
                     if (binaryData && typeof binaryData === 'object') {
                         for (const propName of Object.keys(binaryData)) {
                             const bd = binaryData[propName];
-                            if (!bd || !bd.mimeType)
-                                continue;
-                            // Only upload image MIME types
-                            if (!bd.mimeType.startsWith('image/'))
+                            if (!bd)
                                 continue;
                             try {
                                 const buffer = await this.helpers.getBinaryDataBuffer(i, propName);
-                                const url = await client.uploadImage(buffer, bd.mimeType);
-                                imageUrls.push(url);
+                                const mimeType = bd.mimeType || 'application/octet-stream';
+                                const fileName = bd.fileName || `${propName}.${getExtensionFromMime(mimeType)}`;
+                                const isImage = mimeType.startsWith('image/');
+                                const url = await client.uploadFile(buffer, mimeType, fileName);
+                                files.push({ url, fileName, isImage });
                             }
                             catch (uploadError) {
-                                const errMsg = `[${propName}] ${uploadError.message}`;
+                                const errMsg = `[Binary: ${propName}] ${uploadError.message}`;
                                 uploadErrors.push(errMsg);
                                 if (!this.continueOnFail()) {
                                     throw uploadError;
@@ -1798,15 +1914,43 @@ class GeminiWeb {
                                 continue;
                             }
                             const buffer = await this.helpers.getBinaryDataBuffer(i, propName);
-                            const mimeType = binaryData.mimeType || 'image/jpeg';
-                            const url = await client.uploadImage(buffer, mimeType);
-                            imageUrls.push(url);
+                            const mimeType = binaryData.mimeType || 'application/octet-stream';
+                            const fileName = binaryData.fileName || `${propName}.${getExtensionFromMime(mimeType)}`;
+                            const isImage = mimeType.startsWith('image/');
+                            const url = await client.uploadFile(buffer, mimeType, fileName);
+                            files.push({ url, fileName, isImage });
                         }
                         catch (uploadError) {
-                            const errMsg = `[${propName}] ${uploadError.message}`;
+                            const errMsg = `[Binary: ${propName}] ${uploadError.message}`;
                             uploadErrors.push(errMsg);
                             if (!this.continueOnFail()) {
                                 throw uploadError;
+                            }
+                        }
+                    }
+                }
+                // 2. Process URLs
+                if (imageInput === 'urls' || imageInput === 'combined') {
+                    let fileUrlsRaw = '';
+                    try {
+                        fileUrlsRaw = this.getNodeParameter('fileUrls', i);
+                    }
+                    catch {
+                        fileUrlsRaw = '';
+                    }
+                    const urlList = parseUrlList(fileUrlsRaw);
+                    for (const fileUrl of urlList) {
+                        try {
+                            const downloaded = await downloadFileFromUrl(fileUrl);
+                            const isImage = downloaded.mimeType.startsWith('image/');
+                            const url = await client.uploadFile(downloaded.buffer, downloaded.mimeType, downloaded.fileName);
+                            files.push({ url, fileName: downloaded.fileName, isImage });
+                        }
+                        catch (downloadError) {
+                            const errMsg = `[URL: ${fileUrl}] ${downloadError.message}`;
+                            uploadErrors.push(errMsg);
+                            if (!this.continueOnFail()) {
+                                throw downloadError;
                             }
                         }
                     }
@@ -1817,7 +1961,7 @@ class GeminiWeb {
                     metadata,
                     temporary,
                     gemId,
-                    imageUrls,
+                    files,
                 });
                 let output;
                 if (responseFormat === 'full') {
