@@ -320,6 +320,85 @@ async function nativeHttpsGet(url, options = {}) {
         doRequest(url, maxRedirects);
     });
 }
+async function nativeHttpsGetBuffer(url, options = {}) {
+    if (options.proxy) {
+        const res = await axios_1.default.get(url, {
+            headers: options.headers || {},
+            timeout: options.timeout || 120000,
+            maxRedirects: options.maxRedirects ?? 5,
+            validateStatus: null,
+            proxy: options.proxy,
+            responseType: 'arraybuffer',
+        });
+        return {
+            status: res.status,
+            buffer: Buffer.from(res.data),
+            headers: res.headers,
+        };
+    }
+    const maxRedirects = options.maxRedirects ?? 5;
+    const timeout = options.timeout ?? 120000;
+    return new Promise((resolve, reject) => {
+        const doRequest = (targetUrl, redirectsLeft) => {
+            const parsedUrl = new URL(targetUrl);
+            const isHttps = parsedUrl.protocol === 'https:';
+            const transport = isHttps ? https : http;
+            const reqOptions = {
+                hostname: parsedUrl.hostname,
+                port: parsedUrl.port || (isHttps ? 443 : 80),
+                path: parsedUrl.pathname + parsedUrl.search,
+                method: 'GET',
+                maxHeaderSize: 65536,
+                headers: {
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    ...options.headers,
+                },
+                timeout,
+            };
+            const req = transport.request(reqOptions, (res) => {
+                if ((res.statusCode === 301 || res.statusCode === 302 ||
+                    res.statusCode === 307 || res.statusCode === 308) &&
+                    redirectsLeft > 0 && res.headers.location) {
+                    res.resume();
+                    const redirectUrl = new URL(res.headers.location, targetUrl).href;
+                    doRequest(redirectUrl, redirectsLeft - 1);
+                    return;
+                }
+                const chunks = [];
+                res.on('data', (chunk) => chunks.push(chunk));
+                res.on('end', () => {
+                    let body = Buffer.concat(chunks);
+                    const encoding = res.headers['content-encoding'];
+                    try {
+                        if (encoding === 'gzip') {
+                            body = zlib.gunzipSync(body);
+                        }
+                        else if (encoding === 'deflate') {
+                            body = zlib.inflateSync(body);
+                        }
+                        else if (encoding === 'br') {
+                            body = zlib.brotliDecompressSync(body);
+                        }
+                    }
+                    catch {}
+                    resolve({
+                        status: res.statusCode || 0,
+                        buffer: body,
+                        headers: res.headers,
+                    });
+                });
+            });
+            req.on('error', (err) => {
+                reject(err);
+            });
+            req.on('timeout', () => {
+                req.destroy(new Error('Request timed out'));
+            });
+            req.end();
+        };
+        doRequest(url, maxRedirects);
+    });
+}
 // ============================================================================
 // Native HTTPS POST (properly handles streaming responses from Gemini)
 // ============================================================================
@@ -587,6 +666,29 @@ class GeminiWebClient {
     async uploadImage(imageBuffer, mimeType = 'image/jpeg') {
         return this.uploadFile(imageBuffer, mimeType, 'image.jpg');
     }
+    async downloadImage(imageUrl) {
+        const cookieStr = Object.entries(this.cookies)
+            .map(([k, v]) => `${k}=${v}`)
+            .join('; ');
+        const res = await nativeHttpsGetBuffer(imageUrl, {
+            headers: {
+                'Cookie': cookieStr,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+                'Referer': 'https://gemini.google.com/',
+                'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            },
+            timeout: 60000,
+            proxy: this.proxy,
+        });
+        if (res.status !== 200) {
+            throw new Error(`Failed to download image from Google (status ${res.status})`);
+        }
+        const contentType = res.headers['content-type'] || 'image/jpeg';
+        return {
+            buffer: res.buffer,
+            contentType,
+        };
+    }
     async generateContent(params) {
         if (!this.accessToken) {
             await this.init();
@@ -834,7 +936,7 @@ class GeminiWebClient {
                 const webImages = getNestedValue(cd, [12, 1], []) || [];
                 for (const wi of webImages) {
                     const url = getNestedValue(wi, [0, 0, 0]);
-                    if (url) {
+                    if (url && !result.images.some(img => img.url === url)) {
                         result.images.push({
                             url,
                             title: '',
@@ -847,11 +949,11 @@ class GeminiWebClient {
                 const genImgSources1 = getNestedValue(cd, [12, 7, 0], []) || [];
                 for (const gi of genImgSources1) {
                     const url = getNestedValue(gi, [0, 3, 3]);
-                    if (url) {
+                    if (url && !result.images.some(img => img.url === url)) {
                         result.images.push({
                             url,
                             title: 'Generated Image',
-                            alt: getNestedValue(gi, [0, 3, 2], ''),
+                            alt: getNestedValue(gi, [0, 3, 2], '') || 'image.jpg',
                             generated: true,
                         });
                     }
@@ -907,6 +1009,9 @@ class GeminiWebClient {
                     result.text = `${result.text.trim()}\n\n${extraMarkdown}`;
                 }
             }
+
+            // Clean up standalone Google internal image tag identifiers (e.g. "_735" or "image_agent_tag_123")
+            result.text = result.text.replace(/^(?:image_agent_tag_|_)\d+\s*/i, '').trim();
         }
         result.metadata = metaArray;
         return result;
@@ -2249,6 +2354,40 @@ class GeminiWeb {
                     gemId,
                     files,
                 });
+                // Download generated images and attach to binary data
+                const binaries = {};
+                let imgIndex = 0;
+                if (Array.isArray(response.images)) {
+                    for (const img of response.images) {
+                        if (img.generated || (typeof img.url === 'string' && (img.url.includes('lh3.googleusercontent.com') || img.url.includes('/gg-dl/')))) {
+                            try {
+                                const downloaded = await client.downloadImage(img.url);
+                                const isPng = downloaded.contentType.includes('png');
+                                const ext = isPng ? 'png' : 'jpg';
+                                const baseName = (img.alt && img.alt.includes('.') && !img.alt.includes(' '))
+                                    ? img.alt
+                                    : `gemini_image_${imgIndex}.${ext}`;
+                                const binaryData = await this.helpers.prepareBinaryData(downloaded.buffer, baseName, downloaded.contentType);
+                                const propKey = `image_${imgIndex}`;
+                                binaries[propKey] = binaryData;
+                                if (imgIndex === 0) {
+                                    binaries['data'] = binaryData;
+                                }
+                                img.downloaded = true;
+                                img.binaryProperty = propKey;
+                                imgIndex++;
+                            }
+                            catch (err) {
+                                console.error(`[GeminiWeb] Error downloading generated image: ${err.message}`);
+                            }
+                        }
+                    }
+                }
+                if (imgIndex > 0 && typeof response.text === 'string') {
+                    // Remove unauthenticated Google internal image markdown links from text to avoid broken images
+                    response.text = response.text.replace(/!\[.*?\]\(https?:\/\/[^)]*googleusercontent\.com\/(?:gg-dl|rd-gg-dl)[^)]*\)\n*/gi, '').trim();
+                }
+
                 let output;
                 const uploadedUrls = files.map(f => f.url);
                 if (responseFormat === 'full') {
@@ -2282,10 +2421,14 @@ class GeminiWeb {
                         uploadErrors: uploadErrors.length > 0 ? uploadErrors : undefined,
                     };
                 }
-                returnData.push({
+                const returnItem = {
                     json: output,
                     pairedItem: { item: i },
-                });
+                };
+                if (Object.keys(binaries).length > 0) {
+                    returnItem.binary = binaries;
+                }
+                returnData.push(returnItem);
             }
             catch (error) {
                 if (this.continueOnFail()) {
