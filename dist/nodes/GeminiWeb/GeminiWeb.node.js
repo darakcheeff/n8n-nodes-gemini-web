@@ -1964,6 +1964,7 @@ class GeminiWeb {
                     files,
                 });
                 let output;
+                const uploadedUrls = files.map(f => f.url);
                 if (responseFormat === 'full') {
                     output = {
                         text: response.text,
@@ -1972,7 +1973,8 @@ class GeminiWeb {
                         candidateId: response.candidateId,
                         metadata: response.metadata,
                         images: response.images,
-                        inputImages: imageUrls.length > 0 ? imageUrls : undefined,
+                        inputFiles: files.length > 0 ? files : undefined,
+                        inputImages: uploadedUrls.length > 0 ? uploadedUrls : undefined,
                         uploadErrors: uploadErrors.length > 0 ? uploadErrors : undefined,
                         done: response.done,
                         model,
@@ -1986,7 +1988,8 @@ class GeminiWeb {
                         conversationId: response.conversationId,
                         metadata: response.metadata,
                         gemId: gemId || undefined,
-                        inputImages: imageUrls.length > 0 ? imageUrls : undefined,
+                        inputFiles: files.length > 0 ? files : undefined,
+                        inputImages: uploadedUrls.length > 0 ? uploadedUrls : undefined,
                         uploadErrors: uploadErrors.length > 0 ? uploadErrors : undefined,
                     };
                 }
