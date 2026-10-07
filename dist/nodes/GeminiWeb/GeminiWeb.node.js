@@ -667,10 +667,18 @@ class GeminiWebClient {
         return this.uploadFile(imageBuffer, mimeType, 'image.jpg');
     }
     async downloadImage(imageUrl) {
+        let fetchUrl = imageUrl;
+        if (typeof fetchUrl === 'string' && fetchUrl.includes('googleusercontent.com')) {
+            if (fetchUrl.match(/=s\d+/)) {
+                fetchUrl = fetchUrl.replace(/=s\d+/, '=s0');
+            } else if (!fetchUrl.includes('=s0')) {
+                fetchUrl = `${fetchUrl}=s0`;
+            }
+        }
         const cookieStr = Object.entries(this.cookies)
             .map(([k, v]) => `${k}=${v}`)
             .join('; ');
-        const res = await nativeHttpsGetBuffer(imageUrl, {
+        const res = await nativeHttpsGetBuffer(fetchUrl, {
             headers: {
                 'Cookie': cookieStr,
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
