@@ -609,7 +609,7 @@ class GeminiWebClient {
         // Send request with dynamic model header and automatic retry fallback for error 1097
         let attempt = 0;
         let currentModel = model;
-        while (attempt < 2) {
+        while (attempt < 3) {
             attempt++;
             const modelHeaders = (currentModel && currentModel.header) ? { ...currentModel.header } : {};
             if (modelHeaders[MODEL_HEADER_KEY]) {
@@ -647,10 +647,20 @@ class GeminiWebClient {
             try {
                 return this.parseResponse(res.data, currentModel ? currentModel.name : 'default');
             } catch (err) {
-                if (err.message && err.message.includes('1097') && currentModel && currentModel.header && attempt === 1) {
-                    currentModel = MODELS['default'];
-                    inner[79] = 1;
-                    continue;
+                if (err.message && err.message.includes('1097')) {
+                    if (currentModel && currentModel.header && attempt === 1) {
+                        currentModel = MODELS['default'];
+                        inner[79] = 1;
+                        continue;
+                    }
+                    if (inner[2] && inner[2][0] && attempt < 3) {
+                        // Account has Gemini Apps Activity disabled or conversation expired on Google's backend.
+                        // Reset conversation metadata to fallback to clean generation so the request succeeds
+                        inner[2] = ['', '', '', null, null, null, null, null, null, ''];
+                        currentModel = MODELS['default'];
+                        inner[79] = 1;
+                        continue;
+                    }
                 }
                 throw err;
             }
