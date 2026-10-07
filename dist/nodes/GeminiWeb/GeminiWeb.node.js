@@ -426,11 +426,53 @@ class GeminiWebClient {
         if (res.status !== 200) {
             throw new n8n_workflow_1.NodeOperationError({}, `Failed to connect to Gemini: HTTP ${res.status}. Your cookies may be expired or invalid.`);
         }
-        const html = typeof res.data === 'string' ? res.data : String(res.data);
-        const snlm0e = (html.match(/"SNlM0e":\s*"(.*?)"/) || [])[1] || null;
-        const cfb2h = (html.match(/"cfb2h":\s*"(.*?)"/) || [])[1] || null;
-        const fdrfje = (html.match(/"FdrFJe":\s*"(.*?)"/) || [])[1] || null;
-        const language = (html.match(/"TuX5cc":\s*"(.*?)"/) || [])[1] || null;
+        let html = typeof res.data === 'string' ? res.data : String(res.data);
+        let snlm0e = (html.match(/"SNlM0e":\s*"(.*?)"/) || [])[1] || null;
+        let cfb2h = (html.match(/"cfb2h":\s*"(.*?)"/) || [])[1] || null;
+        let fdrfje = (html.match(/"FdrFJe":\s*"(.*?)"/) || [])[1] || null;
+        let language = (html.match(/"TuX5cc":\s*"(.*?)"/) || [])[1] || null;
+        let usedCookies = allCookies;
+
+        // If SNlM0e was not found with extraCookies, try with this.cookies directly (without anonymous extraCookies)
+        if (!snlm0e && Object.keys(extraCookies).length > 0) {
+            try {
+                const resDirect = await nativeHttpsGet(ENDPOINTS.INIT, {
+                    headers: {
+                        ...GEMINI_HEADERS,
+                        Cookie: cookieStr(this.cookies),
+                    },
+                    timeout: this.timeout,
+                    proxy: this.proxy,
+                });
+                if (resDirect.status === 200) {
+                    const htmlDirect = typeof resDirect.data === 'string' ? resDirect.data : String(resDirect.data);
+                    const snlm0eDirect = (htmlDirect.match(/"SNlM0e":\s*"(.*?)"/) || [])[1] || null;
+                    if (snlm0eDirect) {
+                        console.log('[GeminiWebClient] Direct cookies (without extraCookies) succeeded!');
+                        html = htmlDirect;
+                        snlm0e = snlm0eDirect;
+                        cfb2h = (htmlDirect.match(/"cfb2h":\s*"(.*?)"/) || [])[1] || cfb2h;
+                        fdrfje = (htmlDirect.match(/"FdrFJe":\s*"(.*?)"/) || [])[1] || fdrfje;
+                        language = (htmlDirect.match(/"TuX5cc":\s*"(.*?)"/) || [])[1] || language;
+                        usedCookies = this.cookies;
+                    }
+                }
+            } catch (directErr) {
+                console.log('[GeminiWebClient] Direct cookie retry error:', directErr.message);
+            }
+        }
+
+        console.log('[GeminiWebClient] INIT DIAGNOSTIC:', {
+            hasAccessToken: !!snlm0e,
+            accessTokenPrefix: snlm0e ? snlm0e.substring(0, 8) + '...' : 'NULL',
+            buildLabel: cfb2h,
+            hasSNlM0eInHtml: html.includes('SNlM0e'),
+            hasWIZInHtml: html.includes('WIZ_global_data'),
+            htmlLength: html.length,
+            title: (html.match(/<title>([^<]+)<\/title>/) || [])[1],
+            cookieKeys: Object.keys(usedCookies),
+        });
+
         if (!snlm0e && !cfb2h && !language) {
             throw new n8n_workflow_1.NodeOperationError({}, 'Failed to extract access token from Gemini. Your cookies may be expired or invalid. Please re-export cookies from your browser.');
         }
@@ -438,14 +480,8 @@ class GeminiWebClient {
         this.buildLabel = cfb2h;
         this.sessionId = fdrfje;
         this.language = language || 'en';
-        this.cookies = parseSetCookieHeaders(res.headers, allCookies);
+        this.cookies = parseSetCookieHeaders(res.headers, usedCookies);
         this.reqId = Math.floor(Math.random() * 90000) + 10000;
-        console.log('[GeminiWebClient] INIT:', {
-            hasAccessToken: !!snlm0e,
-            accessTokenPrefix: snlm0e ? snlm0e.substring(0, 8) + '...' : 'NULL (GUEST SESSION - COOKIES EXPIRED OR INVALID)',
-            buildLabel: cfb2h,
-            cookieKeys: Object.keys(allCookies),
-        });
         return {
             success: true,
             hasAccessToken: !!snlm0e,
