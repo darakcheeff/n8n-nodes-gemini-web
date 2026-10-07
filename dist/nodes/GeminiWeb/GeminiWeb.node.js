@@ -126,7 +126,7 @@ function parseCookieString(rawStr) {
         s = s.substring(7).trim();
     }
     const cookies = {};
-    const parts = s.split(';');
+    const parts = s.split(/[\r\n;]+/);
     for (const part of parts) {
         const trimmed = part.trim();
         const eq = trimmed.indexOf('=');
@@ -1862,8 +1862,33 @@ class GeminiWeb {
                 cookies['__Secure-1PSIDCC'] = credentials.secure1Psidcc;
             }
         }
+        // Auto-detect fallback across all credential fields if __Secure-1PSID is missing
         if (!cookies['__Secure-1PSID']) {
-            throw new n8n_workflow_1.NodeOperationError(this.getNode(), '__Secure-1PSID cookie is required. Please provide it in the credentials.');
+            if (credentials.cookieString) {
+                const fb = parseCookieString(credentials.cookieString);
+                if (fb['__Secure-1PSID']) cookies = { ...cookies, ...fb };
+            }
+            if (!cookies['__Secure-1PSID'] && credentials.cookieJson) {
+                const fb = parseCookieJson(credentials.cookieJson);
+                if (fb['__Secure-1PSID']) cookies = { ...cookies, ...fb };
+            }
+            if (!cookies['__Secure-1PSID'] && credentials.secure1Psid) {
+                cookies['__Secure-1PSID'] = credentials.secure1Psid;
+                if (credentials.secure1Psidts) cookies['__Secure-1PSIDTS'] = credentials.secure1Psidts;
+                if (credentials.secure1Psidcc) cookies['__Secure-1PSIDCC'] = credentials.secure1Psidcc;
+            }
+        }
+        console.log('[GeminiWebClient] CREDENTIALS DEBUG:', {
+            authMode: credentials.authMode,
+            hasCookieString: !!credentials.cookieString,
+            cookieStringLen: (credentials.cookieString || '').length,
+            hasCookieJson: !!credentials.cookieJson,
+            cookieJsonLen: (credentials.cookieJson || '').length,
+            hasSecure1Psid: !!credentials.secure1Psid,
+            cookieKeys: Object.keys(cookies),
+        });
+        if (!cookies['__Secure-1PSID']) {
+            throw new n8n_workflow_1.NodeOperationError(this.getNode(), '__Secure-1PSID cookie is required. Please check that your cookies contain __Secure-1PSID.');
         }
         const proxyUrl = credentials.proxyUrl || '';
         const proxy = parseProxy(proxyUrl);
