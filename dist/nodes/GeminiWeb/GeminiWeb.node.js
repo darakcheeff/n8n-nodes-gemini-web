@@ -618,7 +618,9 @@ class GeminiWebClient {
                     if (typeof modelNumber === 'number') {
                         inner[79] = modelNumber;
                     }
-                    headerArray.push(1); // extended_thinking flag
+                    if (params.extendedThinking) {
+                        headerArray.push(1); // extended_thinking flag
+                    }
                     headerArray.push(this.clientSessionUuid);
                     modelHeaders[MODEL_HEADER_KEY] = JSON.stringify(headerArray);
                 } catch {}
@@ -787,6 +789,43 @@ class GeminiWebClient {
                 throw new n8n_workflow_1.NodeOperationError({}, `Gemini API error code: ${fatalErrorCode}. ${getErrorMessage(fatalErrorCode)}${detailStr}\n\nDebug info: model=${modelName}, response snippet: ${text.substring(0, 500)}`);
             }
             throw new n8n_workflow_1.NodeOperationError({}, `Failed to parse Gemini response: no text or images found in response.\n\nDebug info: model=${modelName}, response snippet: ${text.substring(0, 500)}`);
+        }
+        // Format images in text: replace Gemini <Image .../> tags with Markdown ![alt](url)
+        if (result.text && typeof result.text === 'string') {
+            const usedImageUrls = new Set();
+            let imgSeq = 0;
+            result.text = result.text.replace(/<Image\s+([^>]*)\/?>/gi, (match, attrsStr) => {
+                const altMatch = attrsStr.match(/alt=["']([^"']*)["']/i);
+                const captionMatch = attrsStr.match(/caption=["']([^"']*)["']/i);
+                const alt = altMatch ? altMatch[1] : '';
+                const caption = captionMatch ? captionMatch[1] : '';
+                const label = caption || alt || 'Image';
+
+                let matched = null;
+                if (alt && result.images) {
+                    matched = result.images.find(img => img.alt === alt && !usedImageUrls.has(img.url));
+                }
+                if (!matched && caption && result.images) {
+                    matched = result.images.find(img => img.title === caption && !usedImageUrls.has(img.url));
+                }
+                if (!matched && result.images && imgSeq < result.images.length) {
+                    matched = result.images[imgSeq++];
+                }
+                if (matched && matched.url) {
+                    usedImageUrls.add(matched.url);
+                    return `\n\n![${label}](${matched.url})\n\n`;
+                }
+                return label ? `\n\n*${label}*\n\n` : '';
+            });
+
+            // If any images from result.images were not referenced in <Image> tags, append them at the end
+            if (result.images && result.images.length > 0) {
+                const unreferenced = result.images.filter(img => !usedImageUrls.has(img.url));
+                if (unreferenced.length > 0) {
+                    const extraMarkdown = unreferenced.map(img => `![${img.title || img.alt || 'Image'}](${img.url})`).join('\n\n');
+                    result.text = `${result.text.trim()}\n\n${extraMarkdown}`;
+                }
+            }
         }
         result.metadata = metaArray;
         return result;
@@ -2119,6 +2158,7 @@ class GeminiWeb {
                 else {
                     output = {
                         text: response.text,
+                        images: response.images,
                         model,
                         conversationId: response.conversationId,
                         responseId: response.responseId,
