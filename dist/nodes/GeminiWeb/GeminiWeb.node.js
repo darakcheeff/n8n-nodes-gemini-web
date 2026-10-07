@@ -66,6 +66,8 @@ const GRPC = {
     CREATE_GEM: 'oMH3Zd',
     UPDATE_GEM: 'kHv0Vd',
     DELETE_GEM: 'UXcSJb',
+    LIST_CONVERSATIONS: 'MaZiqc',
+    DELETE_CONVERSATION: 'GzXR5e',
 };
 const BATCH_EXEC_HEADERS = {
     'x-goog-ext-525001261-jspb': '[1,null,null,null,null,null,null,null,[4]]',
@@ -807,6 +809,75 @@ class GeminiWebClient {
                 payload,
             }]);
     }
+    async listChats(limit = 50) {
+        const payloads = [
+            {
+                rpcid: GRPC.LIST_CONVERSATIONS,
+                payload: JSON.stringify([limit, null, [1, null, 1]]),
+                identifier: 'pinned',
+            },
+            {
+                rpcid: GRPC.LIST_CONVERSATIONS,
+                payload: JSON.stringify([limit, null, [0, null, 1]]),
+                identifier: 'recent',
+            },
+        ];
+        const parts = await this.batchExecute(payloads);
+        const chats = [];
+        const seenIds = new Set();
+        for (const part of parts) {
+            const partBodyStr = getNestedValue(part, [2]);
+            if (!partBodyStr || typeof partBodyStr !== 'string')
+                continue;
+            let partBody;
+            try {
+                partBody = JSON.parse(partBodyStr);
+            }
+            catch {
+                continue;
+            }
+            const chatList = getNestedValue(partBody, [2]);
+            if (Array.isArray(chatList)) {
+                for (const chatData of chatList) {
+                    if (Array.isArray(chatData) && chatData.length > 1) {
+                        const id = getNestedValue(chatData, [0], '');
+                        if (!id || seenIds.has(id))
+                            continue;
+                        seenIds.add(id);
+                        const title = getNestedValue(chatData, [1], '');
+                        const isPinned = Boolean(getNestedValue(chatData, [2]));
+                        const timestampData = getNestedValue(chatData, [5]);
+                        let updatedAt = null;
+                        if (Array.isArray(timestampData) && timestampData.length >= 1) {
+                            const seconds = timestampData[0];
+                            if (seconds) {
+                                updatedAt = new Date(seconds * 1000).toISOString();
+                            }
+                        }
+                        chats.push({
+                            id,
+                            title,
+                            isPinned,
+                            updatedAt,
+                        });
+                    }
+                }
+            }
+        }
+        return chats;
+    }
+    async deleteChat(chatId) {
+        const payload = JSON.stringify([chatId]);
+        await this.batchExecute([{
+                rpcid: GRPC.DELETE_CONVERSATION,
+                payload,
+            }]);
+        return {
+            success: true,
+            id: chatId,
+            message: `Chat ${chatId} has been deleted.`,
+        };
+    }
 }
 // ============================================================================
 // Utility Functions
@@ -981,6 +1052,18 @@ class GeminiWeb {
                             description: 'Delete a custom Gem by its ID',
                             action: 'Delete gem',
                         },
+                        {
+                            name: 'List Chats',
+                            value: 'listChats',
+                            description: 'Fetch the list of recent conversations / chats',
+                            action: 'List chats',
+                        },
+                        {
+                            name: 'Delete Chat',
+                            value: 'deleteChat',
+                            description: 'Delete a conversation by its ID',
+                            action: 'Delete chat',
+                        },
                     ],
                     default: 'generate',
                 },
@@ -1106,6 +1189,35 @@ class GeminiWeb {
                     displayOptions: {
                         show: {
                             operation: ['updateGem', 'deleteGem'],
+                        },
+                    },
+                },
+                {
+                    displayName: 'Chat Limit',
+                    name: 'chatLimit',
+                    type: 'number',
+                    typeOptions: {
+                        minValue: 1,
+                        maxValue: 100,
+                    },
+                    default: 50,
+                    description: 'Max number of chats to fetch',
+                    displayOptions: {
+                        show: {
+                            operation: ['listChats'],
+                        },
+                    },
+                },
+                {
+                    displayName: 'Chat ID',
+                    name: 'chatId',
+                    type: 'string',
+                    default: '',
+                    description: 'The conversation ID to delete (e.g. "c_...")',
+                    required: true,
+                    displayOptions: {
+                        show: {
+                            operation: ['deleteChat'],
                         },
                     },
                 },
@@ -1360,6 +1472,54 @@ class GeminiWeb {
                 }
                 else {
                     throw error;
+                }
+            }
+            return [returnData];
+        }
+        if (operation === 'listChats') {
+            try {
+                const limit = this.getNodeParameter('chatLimit', 0, 50);
+                const chats = await client.listChats(limit);
+                for (const chat of chats) {
+                    returnData.push({
+                        json: chat,
+                        pairedItem: { item: 0 },
+                    });
+                }
+            }
+            catch (error) {
+                if (this.continueOnFail()) {
+                    returnData.push({
+                        json: { error: error.message },
+                        pairedItem: { item: 0 },
+                    });
+                }
+                else {
+                    throw error;
+                }
+            }
+            return [returnData];
+        }
+        if (operation === 'deleteChat') {
+            for (let i = 0; i < items.length; i++) {
+                try {
+                    const chatId = this.getNodeParameter('chatId', i);
+                    const res = await client.deleteChat(chatId);
+                    returnData.push({
+                        json: res,
+                        pairedItem: { item: i },
+                    });
+                }
+                catch (error) {
+                    if (this.continueOnFail()) {
+                        returnData.push({
+                            json: { error: error.message },
+                            pairedItem: { item: i },
+                        });
+                    }
+                    else {
+                        throw error;
+                    }
                 }
             }
             return [returnData];
