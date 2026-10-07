@@ -400,7 +400,17 @@ class GeminiWebClient {
         await this.testConnection();
     }
     async testConnection() {
-        const allCookies = { ...this.cookies };
+        let extraCookies = {};
+        try {
+            const r = await nativeHttpsGet(ENDPOINTS.GOOGLE, {
+                timeout: this.timeout,
+                proxy: this.proxy,
+            });
+            if (r.status === 200) {
+                extraCookies = parseSetCookieHeaders(r.headers);
+            }
+        } catch {}
+        const allCookies = { ...extraCookies, ...this.cookies };
         if (!allCookies['__Secure-1PSID']) {
             throw new n8n_workflow_1.NodeOperationError({}, '__Secure-1PSID cookie is required. Please check your cookie input.');
         }
@@ -449,53 +459,36 @@ class GeminiWebClient {
         };
     }
     async uploadFile(fileBuffer, mimeType = 'application/octet-stream', fileName = 'file.bin') {
-        if (!this.accessToken) {
-            await this.init();
-        }
-        const size = fileBuffer.length;
-        // Sanitize fileName for HTTP header: Node.js http.request throws TypeError for non-ASCII chars.
-        // Replace any non-ASCII character (e.g. Cyrillic, Chinese, emoji) with '_'.
         const safeFileName = fileName
-            .replace(/[^\x20-\x7E]/g, '_')  // keep only printable ASCII
-            .replace(/[^\w.\-]/g, '_')        // keep only safe chars
-            .substring(0, 200)                // limit length
-            || 'file.bin';
-        // Step 1: Initiate upload to get the upload URL
-        const initiateHeaders = {
-            'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8',
-            'X-Goog-Upload-Command': 'start',
-            'X-Goog-Upload-Header-Content-Length': String(size),
-            'X-Goog-Upload-Header-Content-Type': mimeType,
-            'X-Goog-Upload-File-Name': safeFileName,
-            Cookie: cookieStr(this.cookies),
-        };
-        const initiateRes = await nativeHttpsPost(ENDPOINTS.UPLOAD, '', {
-            headers: initiateHeaders,
-            timeout: this.timeout,
-            proxy: this.proxy,
-        });
-        const uploadUrl = initiateRes.headers['x-goog-upload-url'] ||
-            initiateRes.headers['X-Goog-Upload-URL'];
-        if (!uploadUrl) {
-            throw new n8n_workflow_1.NodeOperationError({}, `Failed to initiate file upload (${fileName}). No upload URL received. Status: ${initiateRes.status}`);
-        }
-        // Step 2: Upload the actual file data
-        const uploadRes = await nativeHttpsPost(uploadUrl, fileBuffer, {
+            .replace(/[^\x20-\x7E]/g, '_')
+            .replace(/[^\w.\-]/g, '_')
+            .substring(0, 200) || 'file.bin';
+        const boundary = '----WebKitFormBoundary' + generateUUID().replace(/-/g, '').substring(0, 16);
+        const header = Buffer.from(
+            `--${boundary}\r\n` +
+            `Content-Disposition: form-data; name="file"; filename="${safeFileName}"\r\n` +
+            `Content-Type: ${mimeType}\r\n\r\n`,
+            'utf-8'
+        );
+        const footer = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf-8');
+        const bodyBuffer = Buffer.concat([header, fileBuffer, footer]);
+
+        const res = await nativeHttpsPost('https://content-push.googleapis.com/upload/', bodyBuffer, {
             headers: {
-                'Content-Type': mimeType,
-                'X-Goog-Upload-Command': 'upload, finalize',
-                'X-Goog-Upload-Offset': '0',
-                Cookie: cookieStr(this.cookies),
+                'Push-ID': 'feeds/mcudyrk2a4khkz',
+                'Content-Type': `multipart/form-data; boundary=${boundary}`,
             },
             timeout: this.timeout,
             proxy: this.proxy,
         });
-        const fileUrl = String(uploadRes.data).trim();
-        if (!fileUrl) {
-            throw new n8n_workflow_1.NodeOperationError({}, `Failed to upload file (${fileName}). No file URL received in response. Status: ${uploadRes.status}`);
+
+        if (res.status !== 200) {
+            throw new n8n_workflow_1.NodeOperationError({}, `Failed to upload file (${fileName}). Status: ${res.status}, response: ${res.data}`);
         }
-        // Update cookies from response
-        this.cookies = parseSetCookieHeaders(uploadRes.headers, this.cookies);
+        const fileUrl = String(res.data).trim();
+        if (!fileUrl) {
+            throw new n8n_workflow_1.NodeOperationError({}, `Failed to upload file (${fileName}). Empty response from upload service.`);
+        }
         return fileUrl;
     }
     async uploadImage(imageBuffer, mimeType = 'image/jpeg') {
