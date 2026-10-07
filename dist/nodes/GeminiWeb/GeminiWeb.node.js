@@ -1069,7 +1069,24 @@ class GeminiWebClient {
             throw new n8n_workflow_1.NodeOperationError({}, `Batch execute failed with status ${res.status}`);
         }
         const responseText = typeof res.data === 'string' ? res.data : String(res.data);
-        return extractJsonArrays(responseText);
+        const rawArrays = extractJsonArrays(responseText);
+        const wrbParts = [];
+        for (const arr of rawArrays) {
+            if (Array.isArray(arr)) {
+                for (const item of arr) {
+                    if (Array.isArray(item) && item[0] === 'wrb.fr') {
+                        wrbParts.push(item);
+                    } else if (Array.isArray(item)) {
+                        for (const sub of item) {
+                            if (Array.isArray(sub) && sub[0] === 'wrb.fr') {
+                                wrbParts.push(sub);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return wrbParts.length > 0 ? wrbParts : rawArrays;
     }
     async fetchGems(includeHidden = false) {
         const payloads = [
@@ -2163,7 +2180,7 @@ class GeminiWeb {
                 for (const chat of chats) {
                     returnData.push({
                         json: chat,
-                        pairedItem: { item: 0 },
+                        ...(items.length > 0 ? { pairedItem: { item: 0 } } : {}),
                     });
                 }
             }
@@ -2171,7 +2188,7 @@ class GeminiWeb {
                 if (this.continueOnFail()) {
                     returnData.push({
                         json: { error: error.message },
-                        pairedItem: { item: 0 },
+                        ...(items.length > 0 ? { pairedItem: { item: 0 } } : {}),
                     });
                 }
                 else {
