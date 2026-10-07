@@ -1867,11 +1867,15 @@ class GeminiWeb {
                 if (operation === 'chat') {
                     const metadataStr = this.getNodeParameter('conversationMetadata', i);
                     if (metadataStr) {
-                        try {
-                            metadata = JSON.parse(metadataStr);
-                        }
-                        catch (e) {
-                            throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Invalid conversation metadata JSON: ${e.message}`, { itemIndex: i });
+                        if (typeof metadataStr === 'object') {
+                            metadata = metadataStr;
+                        } else {
+                            try {
+                                metadata = JSON.parse(metadataStr);
+                            }
+                            catch (e) {
+                                throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Invalid conversation metadata JSON: ${e.message}`, { itemIndex: i });
+                            }
                         }
                     }
                 }
