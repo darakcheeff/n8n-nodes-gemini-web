@@ -482,11 +482,59 @@ class GeminiWebClient {
             await this.init();
         }
         const model = MODELS[params.model || 'gemini-3.6-flash'] || MODELS['gemini-3.6-flash'];
-        const metadata = params.metadata || ['', '', '', null, null, null, null, null, null, ''];
+        // Ensure metadata is always a normalized 10-element array
+        let metadataInput = params.metadata;
+        if (typeof metadataInput === 'string' && metadataInput.trim()) {
+            try {
+                metadataInput = JSON.parse(metadataInput);
+            } catch {}
+        }
+        const reqMetadata = ['', '', '', null, null, null, null, null, null, ''];
+        if (Array.isArray(metadataInput)) {
+            for (let j = 0; j < 10 && j < metadataInput.length; j++) {
+                if (metadataInput[j] !== undefined && metadataInput[j] !== null) {
+                    reqMetadata[j] = metadataInput[j];
+                }
+            }
+        } else if (metadataInput && typeof metadataInput === 'object') {
+            if (metadataInput.conversationId || metadataInput.cid) {
+                reqMetadata[0] = metadataInput.conversationId || metadataInput.cid;
+            }
+            if (metadataInput.responseId || metadataInput.rid) {
+                reqMetadata[1] = metadataInput.responseId || metadataInput.rid;
+            }
+            if (metadataInput.candidateId || metadataInput.rcid) {
+                reqMetadata[2] = metadataInput.candidateId || metadataInput.rcid;
+            }
+            if (metadataInput.context) {
+                reqMetadata[9] = metadataInput.context;
+            }
+            if (Array.isArray(metadataInput.metadata)) {
+                for (let j = 0; j < 10 && j < metadataInput.metadata.length; j++) {
+                    if (metadataInput.metadata[j] !== undefined && metadataInput.metadata[j] !== null) {
+                        reqMetadata[j] = metadataInput.metadata[j];
+                    }
+                }
+            }
+        }
+        // If conversation ID is present but responseId or candidateId is missing,
+        // recover them from chat history
+        if (reqMetadata[0] && (!reqMetadata[1] || !reqMetadata[2])) {
+            try {
+                const lastTurn = await this.getChatLastTurn(reqMetadata[0]);
+                if (lastTurn) {
+                    if (!reqMetadata[1] && lastTurn.rid) reqMetadata[1] = lastTurn.rid;
+                    if (!reqMetadata[2] && lastTurn.rcid) reqMetadata[2] = lastTurn.rcid;
+                }
+            } catch {}
+        }
+        const metadata = reqMetadata;
         const temporary = params.temporary || false;
         const gemId = params.gemId || null;
         const reqId = this.reqId;
         this.reqId += 100000;
+        // Generate UUID for this request
+        const uid = generateUUID();
         // Build the inner request array (81 elements)
         const inner = new Array(81).fill(null);
         let fileList = null;
@@ -518,11 +566,11 @@ class GeminiWebClient {
         if (gemId)
             inner[GEM_FLAG_INDEX] = gemId;
         inner[53] = 0;
+        inner[59] = uid;
         inner[61] = [];
         inner[68] = 1;
+        inner[79] = 1;
         inner[80] = 1;
-        // Generate UUID for this request
-        const uid = generateUUID();
         // Build URL params
         const urlParams = new URLSearchParams({
             hl: this.language,
@@ -573,10 +621,11 @@ class GeminiWebClient {
             conversationId: '',
             responseId: '',
             candidateId: '',
-            metadata: [],
+            metadata: ['', '', '', null, null, null, null, null, null, ''],
             images: [],
             done: false,
         };
+        const metaArray = ['', '', '', null, null, null, null, null, null, ''];
         let fatalErrorCode = null;
         let fatalErrorDetail = null;
         for (const part of parts) {
@@ -616,18 +665,22 @@ class GeminiWebClient {
             // Extract conversation metadata
             const metaData = getNestedValue(pj, [1]);
             if (metaData && Array.isArray(metaData)) {
-                if (metaData[0])
+                if (metaData[0]) {
                     result.conversationId = metaData[0];
-                if (metaData[1])
+                    metaArray[0] = metaData[0];
+                }
+                if (metaData[1]) {
                     result.responseId = metaData[1];
-                result.metadata = metaData;
+                    metaArray[1] = metaData[1];
+                }
+                if (metaData[2]) {
+                    metaArray[2] = metaData[2];
+                }
             }
             // Extract context string (for continuing conversation)
             const ctx = getNestedValue(pj, [25]);
-            if (typeof ctx === 'string') {
-                const m = [...result.metadata];
-                m[9] = ctx;
-                result.metadata = m;
+            if (typeof ctx === 'string' && ctx) {
+                metaArray[9] = ctx;
             }
             // Extract candidates
             const candidates = getNestedValue(pj, [4], []);
@@ -638,6 +691,7 @@ class GeminiWebClient {
                 if (!rcid)
                     continue;
                 result.candidateId = rcid;
+                metaArray[2] = rcid;
                 // Extract text
                 let text = getNestedValue(cd, [1, 0], '');
                 if (typeof text !== 'string')
@@ -689,6 +743,7 @@ class GeminiWebClient {
             }
             throw new n8n_workflow_1.NodeOperationError({}, `Failed to parse Gemini response: no text or images found in response.\n\nDebug info: model=${modelName}, response snippet: ${text.substring(0, 500)}`);
         }
+        result.metadata = metaArray;
         return result;
     }
     // ========================================================================
@@ -892,6 +947,31 @@ class GeminiWebClient {
             id: normalizedChatId,
             message: `Chat ${normalizedChatId} has been deleted.`,
         };
+    }
+    async getChatLastTurn(chatId) {
+        const normalizedChatId = normalizeChatId(chatId);
+        const payload = JSON.stringify([normalizedChatId, 1, null, 1, [0], [4], null, 1]);
+        const parts = await this.batchExecute([{
+            rpcid: GRPC.GET_CONVERSATION,
+            payload,
+        }]);
+        for (const part of parts) {
+            const partBodyStr = getNestedValue(part, [2]);
+            if (partBodyStr && typeof partBodyStr === 'string') {
+                try {
+                    const parsedPayload = JSON.parse(partBodyStr);
+                    const records = Array.isArray(parsedPayload[0]) ? parsedPayload[0] : [];
+                    if (records.length > 0) {
+                        const lastTurn = records[0];
+                        const rid = getNestedValue(lastTurn, [0, 1]) || '';
+                        const candidates = (Array.isArray(lastTurn[3]) && lastTurn[3][0]) || [];
+                        const rcid = (candidates[0] && Array.isArray(candidates[0]) && candidates[0][0]) || '';
+                        return { rid, rcid };
+                    }
+                } catch {}
+            }
+        }
+        return null;
     }
     async getChatMessages(chatId, maxTurns = 500) {
         const normalizedChatId = normalizeChatId(chatId);
@@ -1990,6 +2070,8 @@ class GeminiWeb {
                         text: response.text,
                         model,
                         conversationId: response.conversationId,
+                        responseId: response.responseId,
+                        candidateId: response.candidateId,
                         metadata: response.metadata,
                         gemId: gemId || undefined,
                         inputFiles: files.length > 0 ? files : undefined,
