@@ -567,16 +567,11 @@ class GeminiWebClient {
             // Check for numeric error codes (path [0,5,2,0,1,0])
             const errorCode = getNestedValue(part, [0, 5, 2, 0, 1, 0]);
             if (errorCode) {
-                if (errorCode === 1096) {
-                    // Code 1096 is a harmless session/history status code returned by Google
-                    fatalErrorCode = 1096;
-                    fatalErrorDetail = getNestedValue(part, [0, 5, 2, 0, 1, 1]);
-                } else {
-                    // Extract additional error details if available
-                    const errorDetail = getNestedValue(part, [0, 5, 2, 0, 1, 1]);
-                    const detailStr = errorDetail ? ` Detail: ${String(errorDetail)}` : '';
-                    throw new n8n_workflow_1.NodeOperationError({}, `Gemini API error code: ${errorCode}. ${getErrorMessage(errorCode)}${detailStr}\n\nDebug info: model=${modelName}, response snippet: ${text.substring(0, 500)}`);
-                }
+                // Do not throw immediately! Google streams multiple chunks where some
+                // chunks contain intermediate status codes (e.g. 1096 for session history state,
+                // 1185 for web search grounding events), while subsequent chunks contain the generated text.
+                fatalErrorCode = errorCode;
+                fatalErrorDetail = getNestedValue(part, [0, 5, 2, 0, 1, 1]);
             }
             // Check for string-based error codes (used by HanaokaYuzu/Gemini-API)
             const errorString = getNestedValue(part, [0, 3]);
@@ -671,9 +666,12 @@ class GeminiWebClient {
                 }
             }
         }
-        if (!result.text && (!result.images || result.images.length === 0) && fatalErrorCode) {
-            const detailStr = fatalErrorDetail ? ` Detail: ${String(fatalErrorDetail)}` : '';
-            throw new n8n_workflow_1.NodeOperationError({}, `Gemini API error code: ${fatalErrorCode}. ${getErrorMessage(fatalErrorCode)}${detailStr}\n\nDebug info: model=${modelName}, response snippet: ${text.substring(0, 500)}`);
+        if (!result.text && (!result.images || result.images.length === 0)) {
+            if (fatalErrorCode && fatalErrorCode !== 1096 && fatalErrorCode !== 1185) {
+                const detailStr = fatalErrorDetail ? ` Detail: ${String(fatalErrorDetail)}` : '';
+                throw new n8n_workflow_1.NodeOperationError({}, `Gemini API error code: ${fatalErrorCode}. ${getErrorMessage(fatalErrorCode)}${detailStr}\n\nDebug info: model=${modelName}, response snippet: ${text.substring(0, 500)}`);
+            }
+            throw new n8n_workflow_1.NodeOperationError({}, `Failed to parse Gemini response: no text or images found in response.\n\nDebug info: model=${modelName}, response snippet: ${text.substring(0, 500)}`);
         }
         return result;
     }
@@ -839,6 +837,7 @@ function getErrorMessage(code) {
         1060: 'IP temporarily blocked by Google',
         1096: 'Notice: Session history disabled or background session flag',
         1097: 'Feature not available for your account plan',
+        1185: 'Notice: Web search grounding event',
         // Account status codes (from GetUserStatus RPC)
         1014: 'Access temporarily unavailable (regional or session restrictions)',
         1016: 'Unauthenticated — session expired or cookies invalid',

@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-gemini-web-api",
-  "version": "1.7.1",
+  "version": "1.7.2",
   "description": "n8n community node for Google Gemini Web API using browser cookies (no API key required)",
   "keywords": [
     "n8n-community-node-package",
