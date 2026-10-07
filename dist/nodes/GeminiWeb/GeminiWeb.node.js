@@ -444,6 +444,12 @@ class GeminiWebClient {
         this.language = language || 'en';
         this.cookies = parseSetCookieHeaders(res.headers, allCookies);
         this.reqId = Math.floor(Math.random() * 90000) + 10000;
+        console.log('[GeminiWebClient] INIT:', {
+            hasAccessToken: !!snlm0e,
+            accessTokenPrefix: snlm0e ? snlm0e.substring(0, 8) + '...' : 'NULL (GUEST SESSION - COOKIES EXPIRED OR INVALID)',
+            buildLabel: cfb2h,
+            cookieKeys: Object.keys(allCookies),
+        });
         return {
             success: true,
             hasAccessToken: !!snlm0e,
@@ -933,19 +939,17 @@ class GeminiWebClient {
             }]);
     }
     async listChats(limit = 50) {
-        const payloads = [
-            {
-                rpcid: GRPC.LIST_CONVERSATIONS,
-                payload: JSON.stringify([limit, null, [1, null, 1]]),
-                identifier: 'pinned',
-            },
-            {
-                rpcid: GRPC.LIST_CONVERSATIONS,
-                payload: JSON.stringify([limit, null, [0, null, 1]]),
-                identifier: 'recent',
-            },
-        ];
-        const parts = await this.batchExecute(payloads);
+        const partsPinned = await this.batchExecute([{
+            rpcid: GRPC.LIST_CONVERSATIONS,
+            payload: JSON.stringify([limit, null, [1, null, 1]]),
+            identifier: 'pinned',
+        }]);
+        const partsRecent = await this.batchExecute([{
+            rpcid: GRPC.LIST_CONVERSATIONS,
+            payload: JSON.stringify([limit, null, [0, null, 1]]),
+            identifier: 'recent',
+        }]);
+        const parts = [...partsPinned, ...partsRecent];
         const chats = [];
         const seenIds = new Set();
         for (const part of parts) {
