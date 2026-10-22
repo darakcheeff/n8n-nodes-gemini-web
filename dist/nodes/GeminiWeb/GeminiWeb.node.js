@@ -462,36 +462,97 @@ async function nativeHttpsPost(url, body, options = {}) {
                 nativeHttpsPost(redirectUrl, body, options).then(resolve).catch(reject);
                 return;
             }
-            // Collect ALL response data chunks
-            // This is the critical part: we must wait for 'end' event,
-            // not resolve after the first chunk of data.
+            let isSettled = false;
+            let stream = res;
+            const encoding = (res.headers['content-encoding'] || '').toLowerCase();
+            try {
+                if (encoding === 'gzip') {
+                    const gunzip = zlib.createGunzip();
+                    res.pipe(gunzip);
+                    stream = gunzip;
+                } else if (encoding === 'deflate') {
+                    const inflate = zlib.createInflate();
+                    res.pipe(inflate);
+                    stream = inflate;
+                } else if (encoding === 'br') {
+                    const brotli = zlib.createBrotliDecompress();
+                    res.pipe(brotli);
+                    stream = brotli;
+                }
+            } catch {
+                stream = res;
+            }
+
             const chunks = [];
-            res.on('data', (chunk) => chunks.push(chunk));
-            res.on('end', () => {
-                let responseBody = Buffer.concat(chunks);
-                const encoding = res.headers['content-encoding'];
+            let accumulatedText = '';
+
+            const finalize = (data) => {
+                if (isSettled) return;
+                isSettled = true;
                 try {
-                    if (encoding === 'gzip') {
-                        responseBody = zlib.gunzipSync(responseBody);
-                    }
-                    else if (encoding === 'deflate') {
-                        responseBody = zlib.inflateSync(responseBody);
-                    }
-                    else if (encoding === 'br') {
-                        responseBody = zlib.brotliDecompressSync(responseBody);
-                    }
-                }
-                catch {
-                    // If decompression fails, use raw body
-                }
+                    req.destroy();
+                } catch {}
+                try {
+                    res.destroy();
+                } catch {}
                 resolve({
                     status: res.statusCode || 0,
-                    data: responseBody.toString('utf-8'),
+                    data,
                     headers: res.headers,
                 });
+            };
+
+            stream.on('data', (chunk) => {
+                chunks.push(chunk);
+                accumulatedText += chunk.toString('utf-8');
+                if (options.checkDone) {
+                    try {
+                        if (options.checkDone(accumulatedText)) {
+                            finalize(accumulatedText);
+                        }
+                    } catch {}
+                }
             });
+
+            stream.on('end', () => {
+                if (isSettled) return;
+                let fullText = accumulatedText;
+                if (!fullText && chunks.length > 0) {
+                    try {
+                        let responseBody = Buffer.concat(chunks);
+                        try {
+                            if (encoding === 'gzip') {
+                                responseBody = zlib.gunzipSync(responseBody);
+                            } else if (encoding === 'deflate') {
+                                responseBody = zlib.inflateSync(responseBody);
+                            } else if (encoding === 'br') {
+                                responseBody = zlib.brotliDecompressSync(responseBody);
+                            }
+                        } catch {}
+                        fullText = responseBody.toString('utf-8');
+                    } catch {}
+                }
+                finalize(fullText);
+            });
+
+            stream.on('error', (err) => {
+                if (isSettled) return;
+                if (accumulatedText.length > 0) {
+                    finalize(accumulatedText);
+                } else {
+                    isSettled = true;
+                    reject(err);
+                }
+            });
+
             res.on('error', (err) => {
-                reject(err);
+                if (isSettled) return;
+                if (accumulatedText.length > 0) {
+                    finalize(accumulatedText);
+                } else {
+                    isSettled = true;
+                    reject(err);
+                }
             });
         });
         req.on('error', (err) => {
@@ -831,6 +892,23 @@ class GeminiWebClient {
                 headers,
                 timeout: this.timeout,
                 proxy: this.proxy,
+                checkDone: (text) => {
+                    // Quick check to avoid running parser on raw chunk fragments
+                    if (!text.includes('[2]') && !text.includes('USAGE_LIMIT') && !text.includes('MODEL_')) {
+                        return false;
+                    }
+                    try {
+                        const parsed = this.parseResponse(text, currentModel ? currentModel.name : 'default');
+                        if (parsed && (parsed.done || (parsed.text && parsed.text.length > 0 && parsed.conversationId && parsed.responseId))) {
+                            return true;
+                        }
+                    } catch (e) {
+                        if (e.message && (e.message.includes('Gemini API error') || e.message.includes('1097'))) {
+                            return true;
+                        }
+                    }
+                    return false;
+                },
             });
             this.cookies = parseSetCookieHeaders(res.headers, this.cookies);
             if (res.status !== 200) {
