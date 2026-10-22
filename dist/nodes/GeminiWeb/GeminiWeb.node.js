@@ -81,42 +81,106 @@ function buildModelHeader(modelId, capacityTail, modelNumber) {
         'x-goog-ext-73010990-jspb': '[0,0,0]',
     };
 }
+const CANONICAL_MODELS = [
+    {
+        name: '⚡ Gemini Flash (Latest / Auto)',
+        value: 'flash-latest',
+        description: 'Automatically uses newest active Flash model (3.8, 3.9, etc.)',
+    },
+    {
+        name: 'Gemini 3.8 Flash',
+        value: 'gemini-3.8-flash',
+        description: 'Current standard fast model',
+    },
+    {
+        name: 'Gemini 3.5 Flash-Lite',
+        value: 'gemini-3.5-flash-lite',
+        description: 'Fastest lightweight model',
+    },
+    {
+        name: 'Gemini 3.1 Pro',
+        value: 'gemini-3.1-pro',
+        description: 'Advanced reasoning model (requires Google One AI Premium)',
+    },
+    {
+        name: 'Gemini 4 Argon',
+        value: 'gemini-4-argon',
+        description: 'Next-gen experimental model (requires Google One AI Premium)',
+    },
+    {
+        name: 'Default (Account Model)',
+        value: 'default',
+        description: 'Account default model without override header',
+    },
+];
 const MODELS = {
+    'flash-latest': {
+        name: 'flash-latest',
+        displayName: '⚡ Gemini Flash (Latest / Auto)',
+        header: null,
+        isLatest: true,
+        advancedOnly: false,
+    },
+    'gemini-3.8-flash': {
+        name: 'gemini-3.8-flash',
+        displayName: 'Gemini 3.8 Flash',
+        header: buildModelHeader('fbb127bbb056c959', 1, 1),
+        advancedOnly: false,
+    },
+    'gemini-3.5-flash-lite': {
+        name: 'gemini-3.5-flash-lite',
+        displayName: 'Gemini 3.5 Flash-Lite',
+        header: buildModelHeader('cf41b0e0dd7d53e5', 1, 6),
+        advancedOnly: false,
+    },
+    'gemini-3.1-pro': {
+        name: 'gemini-3.1-pro',
+        displayName: 'Gemini 3.1 Pro',
+        header: buildModelHeader('9d8ca3786ebdfbea', 1, 3),
+        advancedOnly: true,
+    },
+    'gemini-4-argon': {
+        name: 'gemini-4-argon',
+        displayName: 'Gemini 4 Argon',
+        header: buildModelHeader('797f3d0293f288ad', 1, 5),
+        advancedOnly: true,
+    },
     'default': {
         name: 'default',
         displayName: 'Default (Account Model)',
         header: null,
         advancedOnly: false,
     },
+    // Backward compatibility aliases
     'gemini-3.6-flash': {
         name: 'gemini-3.6-flash',
-        displayName: 'Gemini Flash',
+        displayName: 'Gemini 3.8 Flash',
         header: buildModelHeader('fbb127bbb056c959', 1, 1),
         advancedOnly: false,
     },
     'gemini-flash': {
         name: 'gemini-flash',
-        displayName: 'Gemini Flash',
+        displayName: 'Gemini 3.8 Flash',
         header: buildModelHeader('fbb127bbb056c959', 1, 1),
         advancedOnly: false,
     },
     'gemini-flash-lite': {
         name: 'gemini-flash-lite',
-        displayName: 'Gemini Flash Lite',
+        displayName: 'Gemini 3.5 Flash-Lite',
         header: buildModelHeader('cf41b0e0dd7d53e5', 1, 6),
         advancedOnly: false,
     },
     'gemini-3.1-pro-preview': {
         name: 'gemini-3.1-pro-preview',
-        displayName: 'Gemini Pro',
+        displayName: 'Gemini 3.1 Pro',
         header: buildModelHeader('9d8ca3786ebdfbea', 1, 3),
-        advancedOnly: false,
+        advancedOnly: true,
     },
     'gemini-pro': {
         name: 'gemini-pro',
-        displayName: 'Gemini Pro',
+        displayName: 'Gemini 3.1 Pro',
         header: buildModelHeader('9d8ca3786ebdfbea', 1, 3),
-        advancedOnly: false,
+        advancedOnly: true,
     },
 };
 function parseCookieString(rawStr) {
@@ -578,6 +642,8 @@ class GeminiWebClient {
         this.timeout = 300000; // 5 minutes — image processing + content generation takes time
         this.cookies = cookies;
         this.proxy = proxy;
+        this.detectedFastModelId = null;
+        this.detectedThinkModelId = null;
         this.reqId = Math.floor(Math.random() * 90000) + 10000;
         this.clientSessionUuid = generateUUID().toUpperCase();
     }
@@ -676,6 +742,20 @@ class GeminiWebClient {
         this.buildLabel = cfb2h;
         this.sessionId = fdrfje;
         this.language = language || 'en';
+        const fastMatch = html.match(/fast(?:\\u003d|=)([a-f0-9]+)(?:,([a-f0-9]+))?/);
+        if (fastMatch) {
+            this.detectedFastModelId = fastMatch[2] || fastMatch[1];
+        }
+        const thinkMatch = html.match(/thinking(?:\\u003d|=)([a-f0-9]+)(?:,([a-f0-9]+))?/);
+        if (thinkMatch) {
+            this.detectedThinkModelId = thinkMatch[2] || thinkMatch[1];
+        }
+        if (this.detectedFastModelId || this.detectedThinkModelId) {
+            console.log('[GeminiWebClient] DETECTED MODELS:', {
+                fast: this.detectedFastModelId,
+                thinking: this.detectedThinkModelId,
+            });
+        }
         this.cookies = parseSetCookieHeaders(res.headers, this.cookies);
         saveCookieCache(this.cookies['__Secure-1PSID'], this.cookies);
         this.reqId = Math.floor(Math.random() * 90000) + 10000;
@@ -762,7 +842,20 @@ class GeminiWebClient {
         if (!this.accessToken) {
             await this.init();
         }
-        const model = MODELS[params.model || 'gemini-3.6-flash'] || MODELS['gemini-3.6-flash'];
+        const requestedModelKey = params.model || 'flash-latest';
+        let model = MODELS[requestedModelKey] || MODELS['flash-latest'];
+        if (requestedModelKey === 'flash-latest' || model.isLatest) {
+            if (this.detectedFastModelId) {
+                model = {
+                    name: 'flash-latest',
+                    displayName: '⚡ Gemini Flash (Latest / Auto)',
+                    header: buildModelHeader(this.detectedFastModelId, 1, 1),
+                    advancedOnly: false,
+                };
+            } else {
+                model = MODELS['gemini-3.8-flash'];
+            }
+        }
         // Ensure metadata is always a normalized 10-element array
         let metadataInput = params.metadata;
         if (typeof metadataInput === 'string' && metadataInput.trim()) {
@@ -1765,11 +1858,11 @@ class GeminiWeb {
                     displayName: 'Model',
                     name: 'model',
                     type: 'options',
-                    options: Object.entries(MODELS).map(([value, model]) => ({
-                        name: model.displayName,
-                        value,
-                    })),
-                    default: 'gemini-3.6-flash',
+                    typeOptions: {
+                        loadOptionsMethod: 'getModels',
+                    },
+                    options: CANONICAL_MODELS,
+                    default: 'flash-latest',
                     description: 'Choose the Gemini model to use (Advanced models require Google One AI Premium)',
                     displayOptions: {
                         show: {
@@ -2044,6 +2137,13 @@ class GeminiWeb {
                     },
                 },
             ],
+        };
+        this.methods = {
+            loadOptions: {
+                async getModels() {
+                    return CANONICAL_MODELS;
+                },
+            },
         };
     }
     async execute() {
@@ -2549,4 +2649,11 @@ class GeminiWeb {
         return [returnData];
     }
 }
+GeminiWeb.prototype.methods = {
+    loadOptions: {
+        async getModels() {
+            return CANONICAL_MODELS;
+        },
+    },
+};
 exports.GeminiWeb = GeminiWeb;
