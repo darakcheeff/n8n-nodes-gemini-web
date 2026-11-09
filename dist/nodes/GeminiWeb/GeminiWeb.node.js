@@ -527,6 +527,13 @@ async function nativeHttpsPost(url, body, options = {}) {
                 return;
             }
             let isSettled = false;
+            let streamIdleTimer = null;
+            const clearIdleTimer = () => {
+                if (streamIdleTimer) {
+                    clearTimeout(streamIdleTimer);
+                    streamIdleTimer = null;
+                }
+            };
             let stream = res;
             const encoding = (res.headers['content-encoding'] || '').toLowerCase();
             try {
@@ -553,6 +560,7 @@ async function nativeHttpsPost(url, body, options = {}) {
             const finalize = (data) => {
                 if (isSettled) return;
                 isSettled = true;
+                clearIdleTimer();
                 try {
                     req.destroy();
                 } catch {}
@@ -573,8 +581,20 @@ async function nativeHttpsPost(url, body, options = {}) {
                     try {
                         if (options.checkDone(accumulatedText)) {
                             finalize(accumulatedText);
+                            return;
                         }
                     } catch {}
+                }
+                clearIdleTimer();
+                if (options.canFinalizeIdle && accumulatedText.length > 100) {
+                    streamIdleTimer = setTimeout(() => {
+                        if (isSettled) return;
+                        try {
+                            if (options.canFinalizeIdle(accumulatedText)) {
+                                finalize(accumulatedText);
+                            }
+                        } catch {}
+                    }, 3500);
                 }
             });
 
@@ -994,12 +1014,26 @@ class GeminiWebClient {
                         if (parsed && (parsed.done === true || (parsed.metadata && parsed.metadata[9]))) {
                             return true;
                         }
+                        if (parsed && parsed.text && (
+                            parsed.text.includes('</ElicitationsGroup>') ||
+                            (parsed.text.includes('<FollowUp') && parsed.text.includes('/>'))
+                        )) {
+                            return true;
+                        }
                     } catch (e) {
                         if (e.message && (e.message.includes('Gemini API error') || e.message.includes('1097'))) {
                             return true;
                         }
                     }
                     return false;
+                },
+                canFinalizeIdle: (text) => {
+                    try {
+                        const parsed = this.parseResponse(text, currentModel ? currentModel.name : 'default');
+                        return Boolean(parsed && parsed.text && parsed.text.length > 50 && parsed.conversationId && parsed.responseId);
+                    } catch {
+                        return false;
+                    }
                 },
             });
             this.cookies = parseSetCookieHeaders(res.headers, this.cookies);
@@ -1126,8 +1160,11 @@ class GeminiWebClient {
                 text = text.replace(/^http:\/\/googleusercontent\.com\/card_content\/\d+/g, '');
                 text = text.replace(/http:\/\/googleusercontent\.com\/\w+\/\d+\n*/g, '');
                 // Extract completion indicator
-                const indicator = getNestedValue(cd, [8, 0]);
-                result.done = indicator === 2;
+                const rawIndicator = getNestedValue(cd, [8]);
+                const indicator = Array.isArray(rawIndicator) ? rawIndicator[0] : rawIndicator;
+                if (indicator === 2) {
+                    result.done = true;
+                }
                 // Extract images (web images)
                 const webImages = getNestedValue(cd, [12, 1], []) || [];
                 for (const wi of webImages) {
