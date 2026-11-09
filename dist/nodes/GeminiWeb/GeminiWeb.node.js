@@ -517,8 +517,6 @@ async function nativeHttpsPost(url, body, options = {}) {
             timeout,
         };
         const req = transport.request(reqOptions, (res) => {
-            console.log('[nativeHttpsPost response]', res.statusCode, res.headers['content-encoding'], res.headers['content-type']);
-            res.on('data', (c) => console.log('[res raw chunk]', c.length));
             // Handle redirects (unlikely for POST, but just in case)
             if ((res.statusCode === 301 || res.statusCode === 302 ||
                 res.statusCode === 307 || res.statusCode === 308) &&
@@ -571,17 +569,12 @@ async function nativeHttpsPost(url, body, options = {}) {
             stream.on('data', (chunk) => {
                 chunks.push(chunk);
                 accumulatedText += chunk.toString('utf-8');
-                console.log(`[nativeHttpsPost chunk] chunkLen=${chunk.length}, totalLen=${accumulatedText.length}, snippet:`, JSON.stringify(chunk.toString('utf-8').substring(0, 150)));
                 if (options.checkDone) {
                     try {
-                        const done = options.checkDone(accumulatedText);
-                        if (done) {
-                            console.log(`[nativeHttpsPost] checkDone returned true! Finalizing early.`);
+                        if (options.checkDone(accumulatedText)) {
                             finalize(accumulatedText);
                         }
-                    } catch (err) {
-                        console.log(`[nativeHttpsPost] checkDone err:`, err.message);
-                    }
+                    } catch {}
                 }
             });
 
@@ -998,12 +991,10 @@ class GeminiWebClient {
                     }
                     try {
                         const parsed = this.parseResponse(text, currentModel ? currentModel.name : 'default');
-                        console.log(`[checkDone] textLen=${parsed?.text?.length}, done=${parsed?.done}, ctx=${!!(parsed?.metadata && parsed?.metadata[9])}`);
                         if (parsed && (parsed.done === true || (parsed.metadata && parsed.metadata[9]))) {
                             return true;
                         }
                     } catch (e) {
-                        console.log(`[checkDone err]:`, e.message?.substring(0, 100));
                         if (e.message && (e.message.includes('Gemini API error') || e.message.includes('1097'))) {
                             return true;
                         }
@@ -1118,7 +1109,6 @@ class GeminiWebClient {
                 text = text.replace(/http:\/\/googleusercontent\.com\/\w+\/\d+\n*/g, '');
                 // Extract completion indicator
                 const indicator = getNestedValue(cd, [8, 0]);
-                console.log(`[parseResponse] indicator=${indicator}, cd[8]=${JSON.stringify(getNestedValue(cd, [8]))}, textLen=${text?.length}`);
                 result.done = indicator === 2;
                 // Extract images (web images)
                 const webImages = getNestedValue(cd, [12, 1], []) || [];
