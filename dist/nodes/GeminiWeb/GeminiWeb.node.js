@@ -569,6 +569,7 @@ async function nativeHttpsPost(url, body, options = {}) {
             stream.on('data', (chunk) => {
                 chunks.push(chunk);
                 accumulatedText += chunk.toString('utf-8');
+                console.log(`[nativeHttpsPost chunk] chunkLen=${chunk.length}, totalLen=${accumulatedText.length}`);
                 if (options.checkDone) {
                     try {
                         const done = options.checkDone(accumulatedText);
@@ -990,13 +991,12 @@ class GeminiWebClient {
                 timeout: this.timeout,
                 proxy: this.proxy,
                 checkDone: (text) => {
-                    // Quick check to avoid running parser on raw chunk fragments
-                    if (!text.includes('[2') && !text.includes('USAGE_LIMIT') && !text.includes('MODEL_')) {
+                    if (!text || text.length < 50) {
                         return false;
                     }
                     try {
                         const parsed = this.parseResponse(text, currentModel ? currentModel.name : 'default');
-                        console.log(`[checkDone] textLen=${parsed?.text?.length}, done=${parsed?.done}`);
+                        console.log(`[checkDone] textLen=${parsed?.text?.length}, done=${parsed?.done}, ctx=${!!(parsed?.metadata && parsed?.metadata[9])}`);
                         if (parsed && (parsed.done === true || (parsed.metadata && parsed.metadata[9]))) {
                             return true;
                         }
