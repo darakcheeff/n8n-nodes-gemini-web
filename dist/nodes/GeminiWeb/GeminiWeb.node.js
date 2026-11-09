@@ -987,12 +987,12 @@ class GeminiWebClient {
                 proxy: this.proxy,
                 checkDone: (text) => {
                     // Quick check to avoid running parser on raw chunk fragments
-                    if (!text.includes('[2]') && !text.includes('USAGE_LIMIT') && !text.includes('MODEL_')) {
+                    if (!text.includes('[2') && !text.includes('USAGE_LIMIT') && !text.includes('MODEL_')) {
                         return false;
                     }
                     try {
                         const parsed = this.parseResponse(text, currentModel ? currentModel.name : 'default');
-                        if (parsed && (parsed.done || (parsed.text && parsed.text.length > 0 && parsed.conversationId && parsed.responseId))) {
+                        if (parsed && parsed.done === true) {
                             return true;
                         }
                     } catch (e) {
