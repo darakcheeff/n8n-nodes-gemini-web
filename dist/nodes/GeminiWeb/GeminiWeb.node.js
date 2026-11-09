@@ -571,10 +571,14 @@ async function nativeHttpsPost(url, body, options = {}) {
                 accumulatedText += chunk.toString('utf-8');
                 if (options.checkDone) {
                     try {
-                        if (options.checkDone(accumulatedText)) {
+                        const done = options.checkDone(accumulatedText);
+                        if (done) {
+                            console.log(`[nativeHttpsPost] checkDone returned true! Finalizing early.`);
                             finalize(accumulatedText);
                         }
-                    } catch {}
+                    } catch (err) {
+                        console.log(`[nativeHttpsPost] checkDone err:`, err.message);
+                    }
                 }
             });
 
@@ -992,7 +996,8 @@ class GeminiWebClient {
                     }
                     try {
                         const parsed = this.parseResponse(text, currentModel ? currentModel.name : 'default');
-                        if (parsed && parsed.done === true) {
+                        console.log(`[checkDone] textLen=${parsed?.text?.length}, done=${parsed?.done}`);
+                        if (parsed && (parsed.done === true || (parsed.metadata && parsed.metadata[9]))) {
                             return true;
                         }
                     } catch (e) {
@@ -1110,6 +1115,7 @@ class GeminiWebClient {
                 text = text.replace(/http:\/\/googleusercontent\.com\/\w+\/\d+\n*/g, '');
                 // Extract completion indicator
                 const indicator = getNestedValue(cd, [8, 0]);
+                console.log(`[parseResponse] indicator=${indicator}, cd[8]=${JSON.stringify(getNestedValue(cd, [8]))}, textLen=${text?.length}`);
                 result.done = indicator === 2;
                 // Extract images (web images)
                 const webImages = getNestedValue(cd, [12, 1], []) || [];
