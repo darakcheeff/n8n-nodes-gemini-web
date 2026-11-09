@@ -1007,7 +1007,25 @@ class GeminiWebClient {
                 throw new n8n_workflow_1.NodeOperationError({}, `Gemini API request failed with status ${res.status}`);
             }
             try {
-                return this.parseResponse(res.data, currentModel ? currentModel.name : 'default');
+                const parsed = this.parseResponse(res.data, currentModel ? currentModel.name : 'default');
+                const textLower = (parsed.text || '').toLowerCase();
+                const isRefusal = (
+                    textLower.includes('не могу помочь вам с этим') ||
+                    textLower.includes('я просто языковая модель') ||
+                    textLower.includes("can't help with that") ||
+                    textLower.includes('cannot help with that') ||
+                    textLower.includes('just a language model')
+                );
+                if (isRefusal && attempt < 2) {
+                    console.log(`[GeminiWebClient] Google canned refusal detected: "${parsed.text}". Retrying with default model...`);
+                    currentModel = MODELS['default'];
+                    if (inner[2] && inner[2][0]) {
+                        inner[2] = ['', '', '', null, null, null, null, null, null, ''];
+                    }
+                    inner[79] = 1;
+                    continue;
+                }
+                return parsed;
             } catch (err) {
                 if (err.message && err.message.includes('1097') && attempt < 2) {
                     // Fast fallback: reset model to default and reset metadata to clean generation
