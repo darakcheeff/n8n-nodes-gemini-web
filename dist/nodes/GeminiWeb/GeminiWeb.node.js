@@ -517,6 +517,8 @@ async function nativeHttpsPost(url, body, options = {}) {
             timeout,
         };
         const req = transport.request(reqOptions, (res) => {
+            console.log('[nativeHttpsPost response]', res.statusCode, res.headers['content-encoding'], res.headers['content-type']);
+            res.on('data', (c) => console.log('[res raw chunk]', c.length));
             // Handle redirects (unlikely for POST, but just in case)
             if ((res.statusCode === 301 || res.statusCode === 302 ||
                 res.statusCode === 307 || res.statusCode === 308) &&
@@ -569,7 +571,7 @@ async function nativeHttpsPost(url, body, options = {}) {
             stream.on('data', (chunk) => {
                 chunks.push(chunk);
                 accumulatedText += chunk.toString('utf-8');
-                console.log(`[nativeHttpsPost chunk] chunkLen=${chunk.length}, totalLen=${accumulatedText.length}`);
+                console.log(`[nativeHttpsPost chunk] chunkLen=${chunk.length}, totalLen=${accumulatedText.length}, snippet:`, JSON.stringify(chunk.toString('utf-8').substring(0, 150)));
                 if (options.checkDone) {
                     try {
                         const done = options.checkDone(accumulatedText);
@@ -1001,6 +1003,7 @@ class GeminiWebClient {
                             return true;
                         }
                     } catch (e) {
+                        console.log(`[checkDone err]:`, e.message?.substring(0, 100));
                         if (e.message && (e.message.includes('Gemini API error') || e.message.includes('1097'))) {
                             return true;
                         }
