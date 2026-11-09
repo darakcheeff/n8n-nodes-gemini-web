@@ -511,7 +511,7 @@ async function nativeHttpsPost(url, body, options = {}) {
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8',
                 'Content-Length': Buffer.byteLength(bodyBuffer),
-                'Accept-Encoding': 'gzip, deflate, br',
+                'Accept-Encoding': 'identity',
                 ...options.headers,
             },
             timeout,
